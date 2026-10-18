@@ -1,0 +1,25 @@
+# macOS
+.DS_Store
+
+# Xcode
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+*.xcuserdatad/
+*.xccheckout
+*.moved-aside
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# MetalBoy build products
+MetalBoy/Build/
+
+# xcodegen が生成(project.yml が真のソース)
+MetalBoy/MetalBoy.xcodeproj/
+
+# ROM / save files(ユーザーが置く検証用データ)
+*.gb
+*.gbc
+*.sav

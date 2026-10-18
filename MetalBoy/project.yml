@@ -1,0 +1,81 @@
+name: MetalBoy
+options:
+  bundleIdPrefix: com.metalboy
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    CLANG_ENABLE_OBJC_ARC: YES
+    CLANG_ENABLE_MODULES: YES
+    HEADER_SEARCH_PATHS: $(SRCROOT)/Sources/Core $(SRCROOT)/Sources/Features $(SRCROOT)/Sources/UI
+targets:
+  MetalBoyCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/Core
+    settings:
+      base:
+        PRODUCT_NAME: MetalBoyCore
+  MetalBoyFeatures:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/Features
+    dependencies:
+      - target: MetalBoyCore
+    settings:
+      base:
+        PRODUCT_NAME: MetalBoyFeatures
+  MetalBoy:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/UI
+    dependencies:
+      - sdk: MetalKit.framework
+      - sdk: AVFAudio.framework
+      - target: MetalBoyFeatures
+      - target: MetalBoyCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.metalboy.app
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        SWIFT_EMIT_LOC_STRINGS: NO
+  metalboy-testrom:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Tools
+    dependencies:
+      - target: MetalBoyFeatures
+      - target: MetalBoyCore
+    settings:
+      base:
+        PRODUCT_NAME: metalboy-testrom
+  MetalBoyTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: MetalBoyFeatures
+      - target: MetalBoyCore
+schemes:
+  MetalBoy:
+    build:
+      targets:
+        MetalBoy: all
+    test:
+      config: Debug
+      targets:
+        - MetalBoyTests
+  metalboy-testrom:
+    build:
+      targets:
+        metalboy-testrom: all
