@@ -13,6 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) NSUInteger completedFrameCount;
 
 /// $FF40 LCDC
+/// $FF40 LCDC
 @property (nonatomic) uint8_t lcdc;
 /// $FF42 SCY / $FF43 SCX / $FF45 LYC
 @property (nonatomic) uint8_t scy, scx, lyc;

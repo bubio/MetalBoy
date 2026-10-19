@@ -31,6 +31,12 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     NSMutableData *_vram;   // 8KiB
     NSMutableData *_oam;    // 160 bytes
     uint8_t _ly;
+    /// LCD ON 直後の「死相」残 dots(実機 72 dots: LCD OFF→ON 遷移で setting。
+    /// dead 中 = LY=0 固定・モード読出し 0・OAM/VRAM アクセス可(lcdon_timing-GS)
+    uint32_t _lcdBootDots;
+    /// line0(死相後)の mode0(HBlank) 長。通常ラインは 204(MBPPULineDots-80-172)、
+    /// 死相 84 の line0 は LY 増分実測(≈452)に合わせ 196 に短縮
+    uint32_t _bootHBlankDots;
     uint8_t _stat;
     MBPPUMode _mode;
     uint32_t _dotsInMode;
@@ -67,6 +73,8 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _mode3Length = MBPPUMode3BaseLength;
         _completedFrameCount = 0;
         _frameSignaled = NO;
+        _lcdBootDots = 0;
+        _bootHBlankDots = 0;
         _statIrqLine = NO;
         _coincidenceLatch = NO;
     }
@@ -97,6 +105,13 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     // mode 3 中の OAM 書込みは捨てられる(実機同)
     if (self.lcdc & 0x80 && _mode == MBPPUModeDraw) return;
     ((uint8_t *)_oam.mutableBytes)[address] = value;
+}
+
+- (void)setLcdc:(uint8_t)value {
+    // LCD OFF→ON 遷移で「死相」を設定(実機 72 dots: LY=0・モード読出し 0・
+    // OAM/VRAM ともアクセス可 → lcdon_timing-GS 実測からの定数)
+    if ((value & 0x80) && !(_lcdc & 0x80)) _lcdBootDots = 84;
+    _lcdc = value;
 }
 
 - (void)writeSTAT:(uint8_t)value {
@@ -136,6 +151,25 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
     BOOL frameCompleted = NO;
     for (uint32_t i = 0; i < dots; i++) {
+        // LCD ON 直後の死相: LY=0 固定・モード読出し 0(HBlank 相当 = OAM/VRAM アクセス可)。
+        // 終端で mode3(Draw)へ遷移し、line0 = 死相 72 + mode3 172 + mode0 204 = 448 dots。
+        if (_lcdBootDots > 0) {
+            _lcdBootDots--;
+            if (_lcdBootDots == 0) {
+                // 死相終端: line0 は mode2 相位なきまま mode3 開始
+                // (line0 = 死相 84 + mode3 172 + mode0 196 = 452 dots:
+                //  pass1=00/pass2=01/pass3=01 の 4 dot 窓から実機 inc1 ≈ 452)
+                _mode = MBPPUModeDraw;
+                _dotsInMode = 0;
+                _bootHBlankDots = 196;
+            } else {
+                _mode = MBPPUModeHBlank;
+                _ly = 0;
+                _dotsInMode = 0;
+            }
+            [self fireSTATIfRequest:ifRequest];
+            continue;
+        }
         _dotsInMode++;
         switch (_mode) {
             case MBPPUModeOAMScan:
@@ -155,9 +189,13 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
                     [self renderCurrentScanline];
                 }
                 break;
-            case MBPPUModeHBlank:
-                if (_dotsInMode >= MBPPULineDots - 80 - _mode3Length) {
+            case MBPPUModeHBlank: {
+                uint32_t threshold = _bootHBlankDots > 0
+                    ? _bootHBlankDots
+                    : MBPPULineDots - 80 - _mode3Length;
+                if (_dotsInMode >= threshold) {
                     _dotsInMode = 0;
+                    if (_bootHBlankDots > 0) _bootHBlankDots = 0;
                     if (_ly == 143) {
                         _ly = 144;
                         _mode = MBPPUModeVBlank;
@@ -168,6 +206,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
                     }
                 }
                 break;
+            }
             case MBPPUModeVBlank:
                 if (_dotsInMode >= 456) {
                     _dotsInMode = 0;

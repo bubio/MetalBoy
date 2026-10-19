@@ -392,6 +392,47 @@ M 境界位相。intr\_2 系 per-dot パイプライン移植時に CPU/PPU 位�
 **57/75 PASS**(55 → 56 → 57)。追加 PASS: unused\_hwio-GS・vblank\_stat\_intr-GS。
 単体テスト 74/74 GREEN。リグレッションなし(/tmp/mooneye\_results11.txt)。
 
+### 第7弾修正 14: LCD ON 直後の死相(boot phase)実装(2026-10-19)
+
+lcdon\_timing-GS 検証のため MBPPU に LCD OFF→ON 遷移の死相boot phase を実装した。
+実装: `setLcdc:(uint8_t)` を新設し(off→on 遷移で `_lcdBootDots = 84` を設定)、
+`tickDots:dots:` の dot ループ先頭で
+
+- 死相中: `_ly = 0` 固定・`_mode = HBlank`(モード読出し 0)・`_dotsInMode = 0`。
+  OAM/VRAM はともに読み書き可(HBlank 相当)。
+- 死相終端 dot で `_mode = Draw`・`_dotsInMode = 0`・`_bootHBlankDots = 196` を設定し、
+  HBlank 閾値置換で line0 の mode0 = 196 に短縮。
+
+**実測定数(lcdon\_timing-GS から反復較正)**:
+
+| 区間 | dots | 根拠 |
+|---|---|---|
+| 死相(LCD 書込み後) | 84 | STAT\_LYC0 pass1 s1-2(c=17/60)が 0x84(モード 0)のまま |
+| line0 mode3 | 172 | 同左(s2 で 0x87=mode3) |
+| line0 mode0 | 196 | LY pass1/pass2/pass3 s3(c=110/111/112)の 00/01/01 の 4-dot 窓 |
+| **line0 合計 / LY 増分** | **452** | 単体テスト testLCDOnBootPhase で 452±8 域 |
+| line1 以降 | 456(通常) | LY pass1 s4 以降 |
+
+テスト構造: 5 グループ(LY / STAT LYC=0 / STAT LYC=1 / OAM / VRAM)× 3 パス
+(NOP 0/1/2 = 読み取り dot を ±4 dot シフト)× 8 サンプル(c = 0/17/60/110/130/174/224/244)。
+ROM 無パッチで 1 実行 = 1 判定点(fail\_round/fail\_expect/fail\_actual を HRAM $FF98-9A から読む、
+mbLcdonFail)。検証には `jp nz, verify_fail` を NOP 化し pass3 末尾 jp を collect ルーチン
+(24 byte 結果を $C000+g*24 へコピー + カウンタ $FF99 += 24)へ差し替える全観測値採集法
+(mbLcdon)も用意済みだが、現時点では 1-dot 反復較正で十分な速度のため未使用。
+
+**進捗(lcdon\_timing-GS)**: LY グループ pass1 = 24/24 中 8/8 完全一致、STAT\_LYC0 pass1 も
+最初 5 サンプル一致(s1-2 = 84/84 死相、s3 = 87 mode3)。残置 FAIL は **line1 以降の位相**
+(s5(c=174)で exp=83(mode3) vs got=80): 実機は line 以降の位相境界が +4〜8 dot ドリフト
+する(ソースコメント "PPU is late by 2 T-cycles")。line1 の mode2/mode3 境界定数の
+反復較正が次の作業。単体テスト testLCDOnBootPhase 追加済み、Mooneye 他 75 本は
+リグレッションなし(基準 57 PASS と同一)。
+
+### Mooneye 結果(2026-10-19 第7弾修正 14 時点)
+
+**57 PASS / 17 FAIL / 1 判定不能**(sources-GS はソース出力 ROM で判定なし)。
+基準計測(git stash 相当)と FAIL 一致 = リグレッションなし(/tmp/mooneye\_results13.txt,
+600 フレーム条件)。前回計測との 60/75 表記差は計測条件差で、FAIL 集合は同一と判断。
+
 ### boot クラスタ詳細計測(2026-10-19, 未解決)
 
 ### 第6弾修正 8: STAT 割込みラインのエッジトリガ化
@@ -491,7 +532,10 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
 - **PPU GS クラスタ**: vblank\_stat\_intr-GS **PASS(修正 12)**。残り 3 本:
   - hblank\_ly\_scx\_timing-GS: mode3 長の SCX&7 伸縮は修正 13 で実装済み。
     残置は READ cycle と LY 増分の M 境界位相(上記解析参照)。CPU/PPU 位相契約の見直しが必要。
-  - lcdon\_timing-GS・lcdon\_write\_timing-GS: LCD ON 直後のフェッチ/LY0 復帰位相。
+  - lcdon\_timing-GS: **死相 boot phase 実装済み(修正 14)**。LY グループ pass1 と
+    STAT\_LYC0 前半は一致、残置は line1 以降の位相境界ドリフト(+4〜8 dot)の反復較正。
+    解析ツール: /tmp/mbLcdonFail(1 実行 = 1 判定点)/ /tmp/mbBoot(LY 増分 dot 実測)。
+  - lcdon\_write\_timing-GS: LCD ON 書込みタイミング。lcdon\_timing-GS の方式を転用予定。
     PPU 電源投入位相(boot クラスタと同類の定数問題)の可能性、未調査。
 - **intr\_2\_mode0\_timing\_sprites**: 上記分析の通り per-dot OBJ フェッチパイプライン要。
 - **rapid\_di\_ei**: 参照実装でも既知の難関、後回し。

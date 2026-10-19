@@ -148,6 +148,41 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
+/// LCD ON 直後の死相(実機。Mooneye lcdon_timing-GS 実測からの定数):
+/// 死相 84 dots(LY=0 固定・モード読出し 0・OAM/VRAM アクセス可)→ mode3(172)
+/// → mode0 196(LY 増分 = 計 452)。line1 以降は通常 456-dot ライン。
+- (void)testLCDOnBootPhase {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    uint8_t ifRequest = 0;
+
+    ppu.lcdc = 0x11; // LCD OFF(0x91 相当を bit7 落とした状態)
+    for (int i = 0; i < 60; i++) [ppu tickDots:4 ifRequest:&ifRequest];
+
+    ppu.lcdc = 0x81; // LCD ON 遷移 → 死相 84 dots 設定
+    // 死相中(60/240 dots): STAT = bit7+coincidence(bit2: LY=0==LYC=0)、モード 0
+    for (int i = 0; i < 15; i++) [ppu tickDots:4 ifRequest:&ifRequest];
+    XCTAssertEqual(ppu.ly, 0, "死相中 LY=0");
+    XCTAssertEqual(ppu.statValue, 0x84, "死相: モード読出し 0 + coincidence");
+    XCTAssertEqual([ppu readOAM:0], 0x00, "死相中 OAM 読み出し可");
+
+    // 死相終端後: mode3
+    for (int i = 0; i < 22; i++) [ppu tickDots:4 ifRequest:&ifRequest];
+    XCTAssertEqual(ppu.statValue & 0x03, 0x03, "死相終端直後に mode3");
+
+    // LY 増分 = 452-460 dots(1-dot 計数で実測範囲を確認)
+    ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x11;
+    for (int i = 0; i < 60; i++) [ppu tickDots:4 ifRequest:&ifRequest];
+    ppu.lcdc = 0x81;
+    uint32_t flipDots = 0;
+    while (ppu.ly == 0 && flipDots < 600) {
+        [ppu tickDots:1 ifRequest:&ifRequest];
+        flipDots++;
+    }
+    XCTAssertGreaterThanOrEqual(flipDots, 440, "LY 増分は死相 84 + mode3 172 + mode0 196 ≈ 452");
+    XCTAssertLessThanOrEqual(flipDots, 468, "LY 増分は死相 84 + mode3 172 + mode0 196 ≈ 452");
+}
+
 @end
 
 NS_ASSUME_NONNULL_END
