@@ -113,6 +113,9 @@ Tetris(実 BIOS 駆動)の停滞をpc 系ヒストグラム/待機ループの L
 
 ## 修正後の実 ROM 状態(実 BIOS + 600 フレーム、PPM→PNG 目視)
 
+※ 注意: この時点ではまだ 4 倍速バグ(後述 #5)が未発見で、600F の観測は実時間の 2400F 相当。
+   実時間レートでの再検証は「追記(2026-10-19)」の表を参照。
+
 | ROM | 修正前 | 修正後 |
 |---|---|---|
 | Tetris (Japan) (En).gb | RST38 トラップ/白 | ✅ タイトル画面描画(LCDC=$D3・メインループ IE=09 で待機) |
@@ -121,7 +124,83 @@ Tetris(実 BIOS 駆動)の停滞をpc 系ヒストグラム/待機ループの L
 
 ## 残課題
 
-- Tetris のキー入力 → タイトル遷移の確認(`press` 引数での PLAY 検証)。
 - BIOS 起動〜ハンドオーバが実機比でやや遅い(600F 窓内。60-120F かかる)。
-  チム rendering待ちの APU 待ち合わせが原因の可能性 → 要精密化。
+  APU 待ち合わせが原因の可能性 → 要精密化。
 - Mooneye スイートの採用(前回からの継続)。
+
+---
+
+# 追記(2026-10-19): 4 倍速バグ + Blargg 全 11 ROM Passed
+
+## 5. `runFrame` が dots 残量に対して CPU の M-cycle 数を直接減算(4 倍速の正体)
+
+- ユーザ報告「速度が速い・音もおかしい」の根因。`runFrame` は `dotsRemaining = 70224` を
+  残量として保持するが、`stepWithBus:` の返り値は **M-cycle 数**(1 M = 4 dots)なので
+  `dotsRemaining -= cycles` は単位不一致。結果 1 runFrame で 70224 **M-cycle** 分 CPU を回し、
+  PPU/timer/APU は tick 毎に 4 dots 進むため、1 present フレームで **280,896 dots = PPU 4 フレーム分**
+  進行していた(実機の 4 倍速)。
+  - ゲーム内部時間・VBlank 割込みが 4 倍 → 演出/落下速度が速い
+  - APU 波形・フレームシーケンサも 4 倍 → 音が 2 オクターブ上・テンポ 4 倍
+  - サンプル産出が 48kHz の 4 倍量 → 200ms 上限切り詰めで音割れ
+- 対応: 1 フレーム = 70224/4 = **17556 M-cycle** で CPU を駆動するよう修正。
+- 検証: 600 runFrame の APU 産出量が `audio=10.046s / emu-time=10.046s, ratio=1.000`
+  (修正前 ratio=4.000)。実物 GPUペース実測も 59.8fps 前後(実時間 10 秒)。
+- 回帰テスト: `MBGameBoyTests.testRunFrameAdvancesExactlyOneFrameOfDots`
+  (64 フレームで DIV が 17,556 進む)/ `testRunFrameEmitsAboutOneFrameOfAudio`(~1606 int16)。
+- 注意: 以前の検証記録「600F で Tetris タイトル」は 4 倍速下での観測(実時間では 2400F 相当)。
+  修正後は実時間レートのまま記録すること。
+
+## 6. DAA 減算後(N=1)に C をクリアしていた(`MBCPU.m`)
+
+- SM83 では N=1 の DAA で C は変化しない(初期値を保持)。旧実装は `F &= ~(H|C)` で
+  C もクリア。blargg `01-special` #6 と `11-op a,(hl)` が Failed。
+- 対応: 参照実装(BubiBoyLite `cpu_daa`)と同一のアルゴリズムに置換。
+  `setC = carry` 初期で、N=1 では 0x60 補正時のみ C を維持。
+- 回帰テスト: `testDAASubtractionPreservesCarry`。
+
+## 7. `0x34/0x35`(INC/DEC (HL))が switch から欠落(NOP 扱い)
+
+- `$E9/$E8` と同じ「未実装 → NOP」パターン。
+  blargg `11-op a,(hl)` が Failed(`35 34`)、実 ROM のスコア/カウンタ処理にも影響。
+- 対応: `case 0x34/0x35`(IncR/DecR idx=6, cycleCount=3)を追加。
+- 回帰テスト: `testIncDecHLThroughMemory`。
+
+## 修正後の Oracle 状態
+
+- blargg cpu_instrs individual: **11/11 Passed**(修正前 9/11)。
+- 最終検証(実 BIOS・実時間ペース・PPM→PNG 目視):
+  Tetris 2400F タイトル / Pokémon 赤 9600F タイトルロゴ+スプライト /
+  PoP 2400F クレジット画面。すべて実時間相当の進行で描画。
+
+---
+
+# 追記(2026-10-19 第2弾): APU 精密化 + NR52 ステータス + UI キービープ
+
+## 8. APU が「レジスタの静的反映」相当で、音の長さ/減衰がおかしかった(ユーザ報告を再訪)
+
+| 不具合 | 症状 | 対応 |
+|---|---|---|
+| length counter を全く進めていなかった | 音が止まらない/構成が崩れる | FS step 0,2,4,6 で減衰、trigger 時 max リロード |
+| エンベロープの envStep を無視し 128Hz 減衰の乱用ステップ(旧 FS: step 3,7) | 減衰が速く「音長が短い」 | step 7 のみ(64Hz)+ envPeriod での間隔 |
+| ch1 sweep(NR10)未実装 | スライド音程が実装されない | step 2,6 での clock + trigger 時 overflow 判定 |
+| wave の trigger(NR34 bit7)で有効化されない | ch3(低音)が出ない | dacEnabled(NR30)化 + trigger リロード |
+| noise 分周スケール誤り(divcode<<shift でなく (code+1)*2^shift に近い値) | ノイズ音程が高め | 除数表 {8,16,...,112} << shift |
+| 出力 (sum-24)*1000 の int16 ラップ | 音割れ/DC バン | DAC 的 ± 加算(無音=0)、範囲 ±60 → ±30000 |
+| **$FF26 NR52 読みでチャンネル状態ビットが 0 固定** | 音楽ドライバが再突入できず完全無音(Tetris 実測 nonzero 0%) | nr52Value を返すよう修正 |
+
+検証: Tetris を Start 押下で 1P 開始後 2400 フレームの音声統計
+- 修正前: `nonzero 0.0% rms=0`(完全無音)
+- 修正後: `nonzero 94.9% rms=4910 peak=(−18500..19500)`(実時間ペース・実 BIOS)
+
+回帰テスト: `testLengthCounterStopsChannel` / `testSweepOverflowDisablesChannelOnTrigger`
+/ `testDACOffDisablesChannel`(MBCPUTests とは別、MBApuTests へ追加)。
+
+## 9. キー入力で OS 警告音(NSBeep)が鳴る(ユーザ報告)
+
+- 原因: MTKView が first responder としてキーを受け取れず、アプリの NSEvent モニタ後も
+  イベントが responder chain まで届いて「未処理キー」のビープが鳴る。
+- 対応:
+  1. `MBEmulatorView`(MTKView 継承)を first responder にし、`keyDown/Up` を握りつぶす
+  2. AppDelegate のモニタはゲームキー(修飾キー無し)を消費(nil 返し)。Cmd/Ctrl/Option
+     併用はメニュー優先で WAS 消費しない
+- ※ ユーザ側での耳での確認待ち(キービープ抑制)。

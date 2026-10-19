@@ -12,7 +12,6 @@ static const uint32_t kDotsPerFrame = 70224;
 @property (nonatomic, readwrite, strong) MBApu *apu;
 @property (nonatomic, readwrite, strong) MBJoypad *joypad;
 @property (nonatomic, readwrite, strong) MBCartridge *cartridge;
-@property (nonatomic) uint32_t dotsRemaining;
 /// 実 BIOS の可視状態($FF50 書込みで非表示)。nil なら BIOS なしで $0100 開始
 @property (nonatomic) BOOL bootROMVisible;
 @end
@@ -34,8 +33,6 @@ static const uint32_t kDotsPerFrame = 70224;
     _apu = [[MBApu alloc] initWithDefaults];
     _joypad = [[MBJoypad alloc] init];
     _memory = [[MBMemoryMap alloc] init];
-    _dotsRemaining = kDotsPerFrame;
-
     _memory.ppuTarget = _ppu;
     _memory.apuTarget = _apu;
     _memory.joypadTarget = _joypad;
@@ -74,17 +71,19 @@ static const uint32_t kDotsPerFrame = 70224;
 #pragma mark - frame drive
 
 - (BOOL)runFrame {
-    self.dotsRemaining = kDotsPerFrame;
-    uint32_t safetyGuard = kDotsPerFrame * 4;
-    while (self.dotsRemaining > 0) {
+    // 1 フレーム = 70224 dots = 17556 M-cycle。cpu step の返り値は M-cycle なので
+    // M-cycle 単位で配分する(過去は dots 残量に対して M-cycle を直接減算しており、
+    // 1 フレーム分の CPU 駆動が実機の 4 倍回ってゲーム内部時間が 4 倍速になっていた)
+    uint32_t cyclesRemaining = kDotsPerFrame / 4;
+    uint32_t safetyGuard = kDotsPerFrame; // STEP 無限ループ防止(STOP 等の簡易フレーム完了)
+    while (cyclesRemaining > 0) {
         NSUInteger cycles = [self.cpu stepWithBus:self];
-        self.dotsRemaining = (self.dotsRemaining >= cycles) ? self.dotsRemaining - (uint32_t)cycles : 0;
+        cyclesRemaining = (cyclesRemaining >= cycles) ? cyclesRemaining - (uint32_t)cycles : 0;
         if (safetyGuard-- == 0) {
-            // 無限ループ防止(STOP 等の簡易フレーム完了)
             return YES;
         }
     }
-    // フレームの PPU 完了判定は dots ベースの扱い。LY=153 到達でフレーム完了とみなす
+    // フレーム数の管理はセッション側(1 runFrame 呼び出し = 実機 1 フレーム分の時間)
     return YES;
 }
 

@@ -30,6 +30,17 @@ static NSString * const kShaderSource = @
 "    return tex.sample(s, in.texCoord);\n"
 "}\n";
 
+// キーイベントを受け取れるビュー(id)。Monitor 側でゲームキーを消費するため、
+// ここでは未処理キーの NSBeep を抑止するだけのレスポンダとして振る舞う
+@interface MBEmulatorView : MTKView
+@end
+
+@implementation MBEmulatorView
+- (BOOL)acceptsFirstResponder { return YES; }
+- (void)keyDown:(NSEvent *)event { (void)event; /* ゲームキーは MBAppDelegate の NSEvent モニタで消費 */ }
+- (void)keyUp:(NSEvent *)event { (void)event; }
+@end
+
 @interface MBWindowController () <MTKViewDelegate>
 @property (nonatomic, strong) MTKView *mtkView;
 @property (nonatomic, strong) id<MTLDevice> device;
@@ -40,6 +51,13 @@ static NSString * const kShaderSource = @
 @end
 
 @implementation MBWindowController
+
+- (void)showWindow:(id _Nullable)sender {
+    [super showWindow:sender];
+    [self.window makeKeyAndOrderFront:sender];
+    [self.window makeFirstResponder:self.mtkView];
+}
+
 
 - (instancetype)initWithCGSize:(CGSize)contentSize {
     NSRect frame = NSMakeRect(0, 0, contentSize.width, contentSize.height);
@@ -61,12 +79,13 @@ static NSString * const kShaderSource = @
         }
         _commandQueue = [_device newCommandQueue];
 
-        // Metal ビュー
-        MTKView *view = [[MTKView alloc] initWithFrame:frame device:_device];
+        // Metal ビュー(キー入力の first responder)
+        MBEmulatorView *view = [[MBEmulatorView alloc] initWithFrame:frame device:_device];
         view.delegate = self;
         view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         view.drawableSize = CGSizeMake(contentSize.width, contentSize.height);
         window.contentView = view;
+        window.initialFirstResponder = view;
         _mtkView = view;
 
         // フレームテクスチャ(160x144 RGBA8)

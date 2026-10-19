@@ -238,6 +238,52 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertEqual(cpu.pc, 0x0045, "LD A,$77 を実行後の pc");
     XCTAssertEqual(cpu.registerA, 0x77, "IE を許可すると同じ IF で割込みが発効する");
 }
+
+#pragma mark - DAA / INC (HL) / DEC (HL)(実 ROM デバッグで発見したバグの回帰)
+
+/// 旧実装は DAA 減算後(N=1)に C をクリアしていた(SM83 では C は変化させない)。
+/// blargg 01-special #6 / 11-op a,(hl) が Failed していた回帰。
+- (void)testDAASubtractionPreservesCarry {
+    MBCPU *cpu = [[MBCPU alloc] init];
+    MBTestBus *bus = [self makeBus];
+    // SUB $7B(N=1, H=1, C=1) の後 DAA: 0x45-0x7B=0xCA → 0xCA-0x06-0x60 = 0x64
+    [bus loadProgram:@[@0x3E, @0x45, @0xD6, @0x7B, @0x27, @0x18, @0xFE] atAddress:0x0100];
+    for (NSInteger i = 0; i < 2; i++) { [cpu stepWithBus:bus]; } // LD A, SUB
+    [cpu stepWithBus:bus]; // DAA
+    XCTAssertEqual(cpu.registerA, 0x64, "減算後 DAA: 0x45-$7B=0xCA → 0x64");
+    XCTAssertEqual((cpu.registerF & 0x10), 0x10, "N=1 の DAA では C は変化しない(旧実装はクリアしていた)");
+    XCTAssertEqual((cpu.registerF & 0x20), 0x00, "DAA で H はクリア");
+    XCTAssertEqual((cpu.registerF & 0x40), 0x40, "DAA で N は不変");
+
+    // ADD A,$01 で A=0x9B(H: 下位ニブル 0xB>9、N=0、C=0)。DAA は +0x66 → 0x01・C=1
+    [bus loadProgram:@[@0x3E, @0x9A, @0xC6, @0x01, @0x27, @0x18, @0xFE] atAddress:0x0200];
+    [cpu setPC:0x0200];
+    for (NSInteger i = 0; i < 2; i++) { [cpu stepWithBus:bus]; }
+    [cpu stepWithBus:bus];
+    XCTAssertEqual(cpu.registerA, 0x01);
+    XCTAssertEqual((cpu.registerF & 0x10), 0x10, "加算後 DAA: A>0x99 で C を立てる");
+    XCTAssertEqual((cpu.registerF & 0x20), 0x00, "DAA で H はクリア");
+}
+
+/// 旧実装は 0x34/0x35(INC/DEC (HL))を switch に欠落(NOP 相当)していた。
+/// blargg 11-op a,(hl) が Failed(35 34)していた回帰。
+- (void)testIncDecHLThroughMemory {
+    MBCPU *cpu = [[MBCPU alloc] init];
+    MBTestBus *bus = [self makeBus];
+    // LD HL,$D400 / LD (HL),$5A / INC (HL) / JR -2
+    [bus loadProgram:@[@0x21, @0x00, @0xD4, @0x36, @0x5A, @0x34, @0x18, @0xFE] atAddress:0x0100];
+    for (NSInteger i = 0; i < 4; i++) { [cpu stepWithBus:bus]; }
+    XCTAssertEqual([bus byteAt:0xD400], 0x5B, "INC (HL) がメモリ経由で +1(NOP なら 0x5A のまま)");
+    XCTAssertEqual((cpu.registerF & 0x20), 0x00, "0x5A→0x5B: H 立ちなし");
+
+    // LD HL,$D400 / LD (HL),$00 / DEC (HL) / JR -2: 0x00 → 0xFF、N=1・H(貸借)=1
+    [bus loadProgram:@[@0x21, @0x00, @0xD4, @0x36, @0x00, @0x35, @0x18, @0xFE] atAddress:0x0300];
+    [cpu setPC:0x0300];
+    for (NSInteger i = 0; i < 4; i++) { [cpu stepWithBus:bus]; }
+    XCTAssertEqual([bus byteAt:0xD400], 0xFF, "DEC (HL) がメモリ経由で -1");
+    XCTAssertEqual((cpu.registerF & 0x40), 0x40, "DEC (HL): N");
+    XCTAssertEqual((cpu.registerF & 0x20), 0x20, "DEC (HL): 貸借 H");
+}
 @end
 
 NS_ASSUME_NONNULL_END

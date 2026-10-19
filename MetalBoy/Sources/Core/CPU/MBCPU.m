@@ -379,6 +379,7 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0x24: IncR(self, 4, bus); cycleCount = 1; break;
         case 0x2C: IncR(self, 5, bus); cycleCount = 1; break;
         case 0x3C: IncR(self, 7, bus); cycleCount = 1; break;
+        case 0x34: IncR(self, 6, bus); cycleCount = 3; break; // INC (HL)(blargg 11-op a,(hl) 回帰)
         case 0x05: DecR(self, 0, bus); cycleCount = 1; break;
         case 0x0D: DecR(self, 1, bus); cycleCount = 1; break;
         case 0x15: DecR(self, 2, bus); cycleCount = 1; break;
@@ -386,6 +387,7 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0x25: DecR(self, 4, bus); cycleCount = 1; break;
         case 0x2D: DecR(self, 5, bus); cycleCount = 1; break;
         case 0x3D: DecR(self, 7, bus); cycleCount = 1; break;
+        case 0x35: DecR(self, 6, bus); cycleCount = 3; break; // DEC (HL)(blargg 11-op a,(hl) 回帰)
 
         // LD r, n8
         case 0x06: _regB = CPUFetch8(self, bus); cycleCount = 2; break;
@@ -450,21 +452,19 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
             cycleCount = 1;
         } break;
         case 0x2F: { _regA = (uint8_t)(~_regA); _regF = (uint8_t)(_regF | FLAG_N | FLAG_H); cycleCount = 1; } break;
-        case 0x27: { // DAA
-            int32_t adjustment = 0;
-            if (!(_regF & FLAG_N)) {
-                if ((_regF & FLAG_H) || (_regA & 0x0F) > 0x09) adjustment |= 0x06;
-                if ((_regF & FLAG_C) || _regA > 0x99) adjustment |= 0x60;
-                _regA = (uint8_t)(_regA + adjustment);
-                if (adjustment & 0x60) _regF |= FLAG_C;
-                _regF = (uint8_t)(_regF & ~FLAG_H);
-            } else {
-                if (_regF & FLAG_H) adjustment |= 0x06;
-                if (_regF & FLAG_C) adjustment |= 0x60;
-                _regA = (uint8_t)(_regA - adjustment);
-                _regF = (uint8_t)(_regF & ~(FLAG_H|FLAG_C));
-            }
-            if (_regA == 0) _regF |= FLAG_Z;
+        case 0x27: { // DAA(SM83 仕様: N=1 の減算後補正では C を変化させない。blargg 01-special #6 回帰)
+            BOOL subtract = (_regF & FLAG_N) != 0;
+            BOOL halfCarry = (_regF & FLAG_H) != 0;
+            BOOL carry = (_regF & FLAG_C) != 0;
+            uint8_t adjustment = 0;
+            BOOL setC = carry;
+            if (halfCarry || (!subtract && (_regA & 0x0F) > 0x09)) adjustment |= 0x06;
+            if (carry || (!subtract && _regA > 0x99)) adjustment |= 0x60;
+            _regA = subtract ? (uint8_t)(_regA - adjustment) : (uint8_t)(_regA + adjustment);
+            if (adjustment & 0x60) setC = YES;
+            _regF = (uint8_t)((_regA == 0 ? FLAG_Z : 0)
+                              | (subtract ? FLAG_N : 0)
+                              | (setC ? FLAG_C : 0));
             cycleCount = 1;
         } break;
         case 0x37: { _regF = (uint8_t)((_regF & FLAG_Z) | FLAG_C); cycleCount = 1; } break;

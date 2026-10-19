@@ -90,11 +90,12 @@ NS_ASSUME_NONNULL_BEGIN
     // 音声出力を開始(0% の場合もノードは起動し、ゲイン 0 で完全無音)
     [audio start];
 
-    // キーイベントのモニタリング
+    // キーイベントのモニタリング(ゲームキーはここで消費し AppKit へ渡さない。
+    // 未処理キーとして responder chain まで届くと NSBeep が鳴るため)
     __weak MBAppDelegate *weakSelf = self;
     self.localKeyEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *event) {
-        [weakSelf dispatchKeyEvent:event];
-        return event;
+        BOOL consumed = [weakSelf dispatchKeyEvent:event];
+        return consumed ? nil : event;
     }];
 
     [window showWindow:self];
@@ -110,11 +111,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - key events
 
-- (void)dispatchKeyEvent:(NSEvent *)event {
+/// ゲームキーをエミュ入力へ写像したら YES を返す(モニタで消費 → AppKit 未処理ビープ防止)。
+/// Cmd/Ctrl/Option が押されている場合はメニュー等のショートカットを優先(消費しない)。
+- (BOOL)dispatchKeyEvent:(NSEvent *)event {
     BOOL pressed = (event.type == NSEventTypeKeyDown);
+    if (pressed && (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption))) {
+        return NO;
+    }
     NSString *chars = event.charactersIgnoringModifiers;
     MBButton button;
-    if (chars.length == 0) return;
+    if (chars.length == 0) return NO;
     unichar c = [chars characterAtIndex:0];
     switch (c) {
         case NSUpArrowFunctionKey:    button = MBButtonUp; break;
@@ -125,9 +131,10 @@ NS_ASSUME_NONNULL_BEGIN
         case 'x': case 'X':           button = MBButtonA; break;
         case '\r':                    button = MBButtonStart; break;
         case ' ':                     button = MBButtonSelect; break;
-        default: return;
+        default: return NO;
     }
     [self.session setButton:button pressed:pressed];
+    return YES;
 }
 
 #pragma mark - clean stop(ウィンドウ閉鎖・terminate・SIGINT 共通)

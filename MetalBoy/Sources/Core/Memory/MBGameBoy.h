@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// 接続済みのマシンを作る(research R-5: BIOS なしの DMG 電源投入相当で初期化)
 - (nullable instancetype)initWithCartridge:(MBCartridge *)cartridge error:(NSError *_Nullable *_Nullable)error;
 
-/// 1 フレーム分駆動(70224 dots 相当)。返り値: フレームが完成したら YES
+/// 1 フレーム分駆動(70224 dots = 17556 M-cycle 相当)。返り値: フレームが完成したら YES
 - (BOOL)runFrame;
 
 /// Serial 出力(テスト ROM 判定・診断の収集)
