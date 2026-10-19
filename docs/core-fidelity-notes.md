@@ -335,8 +335,64 @@ PASS**(旧 tim01 のみから 12 に)。
 
 ### Mooneye 結果(2026-10-19 第6弾時点)
 
-**54/75 PASS**(52 → 54)。追加 PASS: stat\_irq\_blocking・stat\_lyc\_onoff。
-intr\_2\_mode0\_timing は STAT ラインエッジトリガ化でも維持。
+**55/75 PASS**(52 → 54 → 55)。追加 PASS: stat\_irq\_blocking・stat\_lyc\_onoff・
+intr\_2\_oam\_ok\_timing。intr\_2\_mode0\_timing は STAT ラインエッジトリガ化でも維持。
+
+### 第6弾修正 11: APU IO レジスタの未使用ビット/書込み専用レジスタ読み値(2026-10-19)
+
+Mooneye unused\_hwio-GS(期待表: 各レジスタ 2 回ずつ write=全ビット/0 で read\&mask 判定)を
+HRAM 逆算ではなく**直接プローブ手法**(/tmp/mbhwio: write→read→mask 比較をメモリバスで実行)で
+失敗レジスタを特定した。画面の字形解析(フォントタイル照合)は 2026 版 common の print 実装が
+タイル番号を独自再配置するため不確実 → 静的照合+プローブで確定。
+
+修正内容(MBApu.m readRegister/nr52Value):
+
+- **NR44($FF23)**: 読みを 0x80 固定 → `0x3F | (lengthEnabled ? 0x40 : 0) | 0x80`
+  (未使用 bit0-5 は常に 1)。Mooneye mask=0x3F の 2 件が FAIL だった本体。
+- **NR52($FF26)**: nr52Value に未使用 bit4-6 を常に 1 追加(電源 OFF 中も 0x70)。
+- **$FF18(NR23 相当)**: 0x00 固定 → 0xFF(書込み専用レジスタの読みは 0xFF。
+  FF13/FF1D は default 経由で既に 0xFF)。
+- **NR10($FF10)**: default(0xFF) → `0x80 | sweep 格納値`(bit7=1 + period/negate/shift)。
+
+単体テスト `testUnusedIORegisterBits` 追加。**これで unused\_hwio-GS PASS(→ 56/75)**。
+
+### 第6弾修正 12: LY=144 開始 dot の STAT mode2(OAM) 割込み(2026-10-19)
+
+Mooneye vblank\_stat\_intr-GS: LY=143 からの NOP 数(54/55)で DIV 位相を測り、
+VBlank 割込み(bit0)と STAT mode2 割込み(bit5 源)が LY=144 の同一 dot で立つことを要求。
+round3/4(assert d/e)の失敗を mbtrace3(round 入口 + check\_asserts\_cb@failN ブレーク,
+sym の `01:xxxx` は bank1 local=+0x4000 が実アドレス)で特定:
+
+- 当方: LY=144 遷移 dot で mode=VBlank になり bit5 のライン条件(mode==OAMScan)が不成立 →
+  bit5 による割込みが発火せず、不要な後段 LY=0 の mode2 エッジの stray 割込みで halt が解除
+  → DIV 位相が 1 M-cycle ずれた値(0/1)になった。
+- 修正: fireSTATIfRequest の m2 ウィンドウに `_ly == 144 && _mode == VBlank` を追加
+  (VBlank 開始 dot で bit0 と bit1 が同一 dot の同時に立つ)。単体テスト
+  `testSTATMode2InterruptAtVBlankStart`(RED→GREEN)を追加。**→ vblank\_stat\_intr-GS PASS(57/75)**。
+
+### 第6弾修正 13: mode 3 長の SCX&7 依存伸縮(2026-10-19, 一部残置)
+
+hblank\_ly\_scx\_timing-GS の実機データ: mode0(SCX&7) = 0→51M(204 dots) / 1-4→50M(200) /
+5-7→49M(196)。すなわち mode3 長 = 172 + {0, +4(n=1-4), +8(n=5-7)} dots、mode0 は対応分短縮
+(1 ライン合計 456 は不変)。MBPPU の OAMScan→Draw 遷移時に `_mode3Length` を SCX&7 から決定
+し、mode0 閾値も `456 - 80 - _mode3Length` に。単体テスト testMode3LengthSCXExtension 追加
+(172/176/180 を dot 計数で確認)。
+
+**残置 FAIL の解析**(SCX&7=0.第 1 グループで delay=3 読みが LY=0x41 のまま):
+テストの逆算サイクルは read cycle = t0(STAT int)から 48+delay M-cycle 目。実機は
+delay=3 の read cycle が **LY 増分 cycle(51M 目)と同 dot** になり新値(LY=0x42)が読める。
+当方は同 dot でも 1 M 早い(増分前の 0x41 を返す) = **CPU の割込みディスパッチ開始または
+バス tick の位相が実機より 4 dots(M-cycle 1 個)遅れて観測される**。dispatch=5M・ADD SP,r8=4M・
+RET=4M・CALL=6M・NOP=1M・LD A,(HL)=2M は全て実機一致済みのため、残る候補は
+「HALT 解除→ディスパッチの検出タイミング(PPU tick が M-cycle 中で IF を立てる位置)」の
+M 境界位相。intr\_2 系 per-dot パイプライン移植時に CPU/PPU 位相契約と共に再検証する。
+
+### Mooneye 結果(2026-10-19 第6弾修正 11-13 時点)
+
+**57/75 PASS**(55 → 56 → 57)。追加 PASS: unused\_hwio-GS・vblank\_stat\_intr-GS。
+単体テスト 74/74 GREEN。リグレッションなし(/tmp/mooneye\_results11.txt)。
+
+### boot クラスタ詳細計測(2026-10-19, 未解決)
 
 ### 第6弾修正 8: STAT 割込みラインのエッジトリガ化
 
@@ -358,6 +414,35 @@ stat\_lyc\_onoff(LCD OFF 中 4 ラウンドの LYC 比較)が PASS。
   電源投入既定 = **0x00**(DMG BIOS handover 値 $CF と整合; BIOS は P1 を書かない)。
   ioWrite FF00 は `registerLatch = value & 0x30`。
 - PPU OBP0/OBP1 電源投入既定を 0xE4 → **0xFF**(BGP=0xFC は据え置き)。
+
+### 第6弾修正 10: mode 3 中の OAM ロック(2026-10-19)
+
+実機では mode 3(Draw)中の CPU による OAM アクセスは不可(読みは 0xFF、書込みは捨てられる)。
+`MBPPU.readOAM/writeOAM` に `(lcdc & 0x80) && _mode == Draw` のゲートを追加
+(内部レンダリングの `_oam` 直参照には影響しない。LCD OFF 中はモード凍結によりアクセス可)。
+OAM DMA 転送経路(writeOAM 直接呼び出し)はゲート外のまま。
+
+これで `intr_2_oam_ok_timing`(mode2 STAT 割込みから OAM 再アクセス可能点を測定)が PASS。
+OAM アンロック点 = mode0 遷移点と同一 dot で実機と整合(intr_2_mode0_timing と同一の
+delay 46/45 構造で実測)。
+
+### intr_2_mode0_timing_sprites の分析(未通過, 本丸)
+
+スプライト構成による mode 3 伸長(スプライト毎 +4/+8 dots、ストラック・8 間隔配置で
+最大 +108 dots)の精密モデルが必要。要件を精査した結果:
+
+- テーブルの expected 値 X は sled 長 `41+X` / `40+X` NOP の差分 → mode3 伸長は
+  **4 dot 粒度**で判定される。
+- この precision(±4 dots)を出すには SameBoy 相当の per-dot OBJ フェッチパイプライン
+  (7 状態フェッチャ + PUSH は fifo 空まで待つ + OBJ 注入 seek+6dot、inline_const テーブルの
+  歴 年 検証済みモデル)の移植が必要。現行の固定 80/172/204 mode モデルでは表現不能。
+- 計画: /tmp/mscp_harness.py(試作シミュレータ)で SameBoy pipeline を模倣したが
+  SameBoy 内部の line-base 位相や renders-shin 境界を精確に再現しきれず未完。
+  次ステップ: SameBoy Core/display.c の mode3 ループを dot 粒度で忠実に MBPPU に写像する
+  設計が必要(モード遷移・STAT/LYC・renderCurrentScanline 位置との整合に細心の注意)。
+  実装は大規模( raccourci: 500 行〜)のため、他の未通過クラスの精密化が終わってから着手する。
+- スプライト OAM X マッピング: OAM X = LCD x + 8(左端 pixel = X-8)。
+  OAM X=0 → 左側完全オフ画面でも penalty 発生(+8 dots)、X≥168 → penalty なし。
 
 ### boot クラスタ詳細計測(2026-10-19, 未解決)
 
@@ -397,13 +482,17 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
 
 ### 既知の未通過(精密化バックログ)
 
-- **指示 timing クラス**(ret/rst/ei/intr 系): ei\_timing・ei\_sequence・reti\_intr\_timing・
-  ie\_push は未通過。割込みディスパッチ/IME 更新タイミングの 1 cycle 精度が要る。
-- **timer クラス**(tim00/tim10/tim11・\*\_div\_trigger の一部・tima\_reload・div\_write):
-  DIV/TIMA の立下り位相整合。rapid\_toggle・rapid\_di\_ei は参照実装でも既知の難関。
-- **boot\_div/boot\_hwio/boot\_regs-\*・boot\_sclk\_align**: BIOS ハンドオーバ時の
-  レジスタ/DIV 値の実機一致性。**boot\_regs-dmg0 は PASS**(BIOS 供給ランナー)。
+- **boot\_div/boot\_hwio/boot\_regs-\*・boot\_sclk\_align(-dmgABC/mgb/-S/-sgb\*)**: BIOS
+  ハンドオーバ時のレジスタ/DIV 値の実機一致性。**boot\_regs-dmg0 は PASS**(BIOS 供給ランナー)。
   boot\_div・boot\_hwio は上記詳細計測の通り ~+6,269 dots の位相差のみ。
-  ハードオラクル(実機の電源投入時ライン位相)が得られない限り一旦 close。
-- **PPU stat/LCD 系**(stat\_irq\_blocking・lcdon\_timing・\*-GS 等): PPU 精密化後の課題。
+  ハードオラクル(実機の電源投入時ライン位相)が得られない限り一旦 close
+  (boot\_regs-dmgABC/mgb/sgb/sgb2 は複数モデルの BIOS 差分のため要ランナー対応)。
+- **unused\_hwio-GS**: **PASS(修正 11)**。FF23/FF26/FF18/FF10 の読み値を修正。
+- **PPU GS クラスタ**: vblank\_stat\_intr-GS **PASS(修正 12)**。残り 3 本:
+  - hblank\_ly\_scx\_timing-GS: mode3 長の SCX&7 伸縮は修正 13 で実装済み。
+    残置は READ cycle と LY 増分の M 境界位相(上記解析参照)。CPU/PPU 位相契約の見直しが必要。
+  - lcdon\_timing-GS・lcdon\_write\_timing-GS: LCD ON 直後のフェッチ/LY0 復帰位相。
+    PPU 電源投入位相(boot クラスタと同類の定数問題)の可能性、未調査。
+- **intr\_2\_mode0\_timing\_sprites**: 上記分析の通り per-dot OBJ フェッチパイプライン要。
+- **rapid\_di\_ei**: 参照実装でも既知の難関、後回し。
 - **Tetris 約40秒以降の無音**(上記観測メモ)。

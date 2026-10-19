@@ -42,6 +42,30 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - 精密化(2026-10-19): length / sweep / DAC-off の回帰
 
+/// 未使用 IO ビットの読み出し(Mooneye unused_hwio-GS): NR44 bit0-5・NR52 bit4-6 は常に 1、
+/// NR13 相当の FF18(ch2 周波数下位)は書込み専用 → 0xFF、NR10 は sweep 格納値を反映
+- (void)testUnusedIORegisterBits {
+    MBApu *apu = [[MBApu alloc] initWithDefaults];
+
+    // NR44(FF23): 未使用 bit0-5 = 1(電源 ON のまま)
+    XCTAssertEqual([apu readRegister:0xFF23] & 0x3F, 0x3F, "NR44 未使用ビット読み 1");
+
+    // NR52(FF26): 未使用 bit4-6 = 1
+    XCTAssertEqual(apu.nr52Value & 0x70, 0x70, "NR52 未使用ビット読み 1");
+
+    // 電源 OFF 中も bit4-6 = 1(チャンネル bit0-3 と bit7 は 0)
+    [apu writeRegister:0x00 address:0xFF26];
+    XCTAssertEqual(apu.nr52Value, 0x70, "APU 電源 OFF 中の NR52 = 0x70");
+    [apu writeRegister:0x80 address:0xFF26];
+
+    // FF18(NR23 相当, ch2 周波数下位)は書込み専用: 読み 0xFF(FF13/FF1D と同型)
+    XCTAssertEqual([apu readRegister:0xFF18], 0xFF, "FF18 読みは 0xFF");
+
+    // NR10(FF10): bit7=1 + sweep 格納値
+    [apu writeRegister:0x2A address:0xFF10]; // period=2, dir=down(bit3=1), shift=2
+    XCTAssertEqual([apu readRegister:0xFF10], 0xAA, "NR10 = 0x80|sweep格納値");
+}
+
 /// NR14 bit6(length enable)+trigger: length counter(64)分の FS step 後にチャンネルが停止する
 - (void)testLengthCounterStopsChannel {
     MBApu *apu = [[MBApu alloc] initWithDefaults];

@@ -14,6 +14,11 @@ typedef NS_ENUM(uint8_t, MBPPUMode) {
     MBPPUModeDraw    = 3,
 };
 
+// スキャンライン構成 dots(mode3 長は SCX&7 により伸縮 → _mode3Length ivar)
+static const uint32_t MBPPULineDots        = 456;
+static const uint32_t MBPPUMode2Length     = 80;
+static const uint32_t MBPPUMode3BaseLength = 172;
+
 #pragma mark - DMG 初期値(電源投入相当)
 
 static const uint8_t kDefaultLCDC = 0x91;
@@ -29,6 +34,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     uint8_t _stat;
     MBPPUMode _mode;
     uint32_t _dotsInMode;
+    uint32_t _mode3Length;   // 現ラインの mode 3 長(SCX&7 で伸縮、実機。hblank_ly_scx_timing-GS)
     BOOL _frameSignaled;
     BOOL _statIrqLine;       // 内部 STAT 割込みライン(エッジ判定用)
     BOOL _coincidenceLatch;  // LCD OFF 中に保持される LY==LYC 最終比較結果
@@ -58,6 +64,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _stat = 0x00;
         _mode = MBPPUModeOAMScan;
         _dotsInMode = 0;
+        _mode3Length = MBPPUMode3BaseLength;
         _completedFrameCount = 0;
         _frameSignaled = NO;
         _statIrqLine = NO;
@@ -80,11 +87,15 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
 - (uint8_t)readOAM:(uint16_t)address {
     address &= 0xFF;
+    // mode 3 中の OAM 読み出しは不可 = 0xFF を返す(実機。Mooneye intr_2_oam_ok_timing)
+    if (self.lcdc & 0x80 && _mode == MBPPUModeDraw) return 0xFF;
     return ((const uint8_t *)_oam.bytes)[address];
 }
 
 - (void)writeOAM:(uint8_t)value address:(uint16_t)address {
     address &= 0xFF;
+    // mode 3 中の OAM 書込みは捨てられる(実機同)
+    if (self.lcdc & 0x80 && _mode == MBPPUModeDraw) return;
     ((uint8_t *)_oam.mutableBytes)[address] = value;
 }
 
@@ -111,8 +122,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
 #pragma mark - tick(1 dot 単位で進行)
 
-- (BOOL)tickDots:(uint32_t)dots ifRequest:(uint8_t *)ifRequest {
-    if (!(self.lcdc & 0x80)) {
+- (BOOL)tickDots:(uint32_t)dots ifRequest:(uint8_t *)ifRequest {    if (!(self.lcdc & 0x80)) {
         // LCD OFF: LY=0・モード 0 に固定。直前のフレーム完了は 1 度だけ通知
         _mode = MBPPUModeHBlank;
         _ly = 0;
@@ -129,20 +139,24 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _dotsInMode++;
         switch (_mode) {
             case MBPPUModeOAMScan:
-                if (_dotsInMode >= 80) {
+                if (_dotsInMode >= MBPPUMode2Length) {
                     _dotsInMode = 0;
                     _mode = MBPPUModeDraw;
+                    // mode 3 長は SCX&7 で伸縮(実機。Mooneye hblank_ly_scx_timing-GS:
+                    // SCX&7=0 → +0 / 1-4 → +4 dots / 5-7 → +8 dots)
+                    uint32_t n = self.scx & 0x07;
+                    _mode3Length = MBPPUMode3BaseLength + (n == 0 ? 0 : (4 * ((n + 3) / 4)));
                 }
                 break;
             case MBPPUModeDraw:
-                if (_dotsInMode >= 172) {
+                if (_dotsInMode >= _mode3Length) {
                     _dotsInMode = 0;
                     _mode = MBPPUModeHBlank;
                     [self renderCurrentScanline];
                 }
                 break;
             case MBPPUModeHBlank:
-                if (_dotsInMode >= 204) {
+                if (_dotsInMode >= MBPPULineDots - 80 - _mode3Length) {
                     _dotsInMode = 0;
                     if (_ly == 143) {
                         _ly = 144;
@@ -183,9 +197,12 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     if (self.lcdc & 0x80) {
         BOOL coincidence = (_ly == self.lyc);
         _coincidenceLatch = coincidence; // OFF 遷移時の保持値を常時更新
+        // bit5(OAM mode2): LY=144 の VBlank 開始でも同一 dot で発火する(実機。
+        // Mooneye vblank_stat_intr-GS: vblank IF と stat m2 IF が同時)
+        BOOL m2Window = (_mode == MBPPUModeOAMScan) || (_ly == 144 && _mode == MBPPUModeVBlank);
         line = (((_stat & 0x08) && _mode == MBPPUModeHBlank)
              || ((_stat & 0x10) && _mode == MBPPUModeVBlank)
-             || ((_stat & 0x20) && _mode == MBPPUModeOAMScan)
+             || ((_stat & 0x20) && m2Window)
              || ((_stat & 0x40) && coincidence));
     } else {
         line = ((_stat & 0x40) && _coincidenceLatch);

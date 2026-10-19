@@ -56,6 +56,98 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertFalse(ifRequest & 0x01, "LCD OFF では VBlank 割り込みなし");
 }
 
+// mode 3(Draw)中の OAM ロック: 読み 0xFF・書込み捨て(実機。Mooneye intr_2_oam_ok_timing)
+// モード観測は公開 API statValue($FF41 読み値)の bit1-0
+- (void)testOAMLockedDuringMode3 {    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x91; // LCD on
+
+    uint8_t ifRequest = 0;
+    BOOL checkedMode2 = NO;   // mode2 = $FF41&3 == 2
+    BOOL checkedMode3 = NO;   // mode3 = $FF41&3 == 3
+    BOOL checkedMode0 = NO;   // mode0 = $FF41&3 == 0
+    for (NSInteger dot = 0; dot < 456 * 2 && !(checkedMode2 && checkedMode3 && checkedMode0); dot++) {
+        switch (ppu.statValue & 0x03) {
+            case 0x00: // HBlank: アクセス可
+                if (!checkedMode0) {
+                    checkedMode0 = YES;
+                    [ppu writeOAM:0xCD address:4];
+                    XCTAssertEqual([ppu readOAM:4], 0xCD, "mode0 中は OAM 書込み有効");
+                }
+                break;
+            case 0x02: // OAMScan: アクセス可
+                if (!checkedMode2) {
+                    checkedMode2 = YES;
+                    [ppu writeOAM:0xAB address:2];
+                    XCTAssertEqual([ppu readOAM:2], 0xAB, "mode2 中は OAM 読書き可");
+                }
+                break;
+            case 0x03: // Draw: ロック
+                if (!checkedMode3) {
+                    checkedMode3 = YES;
+                    XCTAssertEqual([ppu readOAM:0], 0xFF, "mode3 中の OAM 読みは 0xFF");
+                    [ppu writeOAM:0x77 address:3];
+                    XCTAssertEqual([ppu readOAM:3], 0xFF, "mode3 中の OAM 書込みは捨てられる");
+                }
+                break;
+            default: // mode1 = VBlank
+                break;
+        }
+        [ppu tickDots:1 ifRequest:&ifRequest];
+    }
+    XCTAssertTrue(checkedMode2 && checkedMode3 && checkedMode0, "3 モードすべて観測");
+
+    // mode0 中の検査は次フレームの mode0 で値を確定確認(HBlank 観測は 1 行 1 回の可能性があるため)
+    XCTAssertEqual([ppu readOAM:2], 0xAB, "mode2 中に書んだ値が保持されている");
+    XCTAssertEqual([ppu readOAM:3], 0x00, "mode3 中に書んだ値は破棄されている");
+}
+
+/// LY=144 の VBlank 開始 dot で STAT bit5(OAM form2)割込みが VBlank IF(bit0)と
+/// 同時に立つ(実機。Mooneye vblank_stat_intr-GS)
+- (void)testSTATMode2InterruptAtVBlankStart {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x91; // LCD on
+    [ppu writeSTAT:0x20]; // bit5(OAM mode2 割込み)のみ
+
+    uint8_t ifRequest = 0;
+    // LY 143 に到達するまで進める
+    while (ppu.ly < 143) {
+        [ppu tickDots:1 ifRequest:&ifRequest];
+    }
+    // 残り 455 dots + 遷移 dot。遷移 dot 直前の状態に整えてから 1 dot 進める
+    for (NSUInteger i = 0; i < 455; i++) [ppu tickDots:1 ifRequest:&ifRequest];
+    ifRequest = 0;
+    [ppu tickDots:1 ifRequest:&ifRequest];
+
+    XCTAssertEqual(ppu.ly, 144);
+    XCTAssertEqual(ifRequest & 0x01, 0x01, "VBlank IF bit0");
+    XCTAssertEqual(ifRequest & 0x02, 0x02, "STAT m2 IF bit1 も同一 dot で立つ");
+}
+
+/// mode 3 長の SCX 依存伸縮(実機。Mooneye hblank_ly_scx_timing-GS):
+/// SCX&7 = 0 → 172 / 1-4 → 176 / 5-7 → 180 dots(mode0 は 204 から対応分減る)
+- (void)testMode3LengthSCXExtension {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x91;
+    [ppu writeSTAT:0x00];
+
+    static const uint32_t expected[8] = {172, 176, 176, 176, 176, 180, 180, 180};
+    for (NSUInteger n = 0; n <= 7; n++) {
+        ppu.scx = (uint8_t)n;
+        // mode2 開始を捕捉(ライン開始)
+        uint8_t ifRequest = 0;
+        while ((ppu.statValue & 0x03) != 0x02) [ppu tickDots:1 ifRequest:&ifRequest];
+        // mode3 開始まで
+        while ((ppu.statValue & 0x03) != 0x03) [ppu tickDots:1 ifRequest:&ifRequest];
+        // mode3 長を dots 計数
+        uint32_t len = 0;
+        do {
+            [ppu tickDots:1 ifRequest:&ifRequest];
+            len++;
+        } while ((ppu.statValue & 0x03) == 0x03 && len < 250);
+        XCTAssertEqual(len, expected[n], "SCX&7=%lu", n);
+    }
+}
+
 @end
 
 NS_ASSUME_NONNULL_END

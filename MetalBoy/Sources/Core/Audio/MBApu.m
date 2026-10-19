@@ -403,6 +403,8 @@ static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *
 
 - (uint8_t)readRegister:(uint16_t)address {
     switch (address) {
+        case 0xFF10:
+            return (uint8_t)(0x80 | (_s.sweep.period << 4) | (_s.sweep.negate ? 0x08 : 0) | _s.sweep.shift);
         case 0xFF11: return (uint8_t)((_s.square2[0].duty << 6) | 0x3F);
         case 0xFF12:
             return (uint8_t)((_s.square2[0].envelope.initialVolume << 4)
@@ -414,7 +416,7 @@ static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *
             return (uint8_t)((_s.square2[1].envelope.initialVolume << 4)
                              | (_s.square2[1].envelope.envIncrease ? 0x08 : 0)
                              | _s.square2[1].envelope.envPeriod);
-        case 0xFF18: return 0x00;
+        case 0xFF18: return 0xFF; // NR23 は書込み専用(実機: 読み 0xFF)
         case 0xFF19: return (uint8_t)((_s.square2[1].freqRaw >> 8) & 0x07);
         case 0xFF1A: return (uint8_t)(_s.wave.dacEnabled ? 0xFF : 0x7F);
         case 0xFF1C: return (uint8_t)((_s.wave.volumeCode << 5) | 0x9F);
@@ -425,7 +427,8 @@ static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *
                              | _s.noise.envelope.envPeriod);
         case 0xFF22:
             return (uint8_t)((_s.noise.shift << 4) | (_s.noise.widthMode << 3) | _s.noise.dividerCode);
-        case 0xFF23: return 0x80;
+        case 0xFF23:
+            return (uint8_t)(0x3F | (_s.noise.lengthEnabled ? 0x40 : 0x00) | 0x80); // 未使用 bit0-5=1
         case 0xFF24: return _s.nr50;
         case 0xFF25: return _s.nr51;
         case 0xFF26:
@@ -439,12 +442,13 @@ static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *
 }
 
 - (uint8_t)nr52Value {
-    uint8_t result = _s.apuEnabled ? 0x80 : 0x00;
+    uint8_t result = 0x70; // 未使用 bit4-6 は常に 1(Mooneye unused_hwio)
     if (_s.apuEnabled) {
+        result |= 0x80;
         if (_s.square2[0].enabled) result |= 0x01;
         if (_s.square2[1].enabled) result |= 0x02;
-        if (_s.wave.enabled)      result |= 0x04;
-        if (_s.noise.enabled)     result |= 0x08;
+        if (_s.wave.enabled)       result |= 0x04;
+        if (_s.noise.enabled)      result |= 0x08;
     }
     return result;
 }
