@@ -22,10 +22,9 @@ typedef NS_OPTIONS(NSUInteger, MBJoypadButtonMask) {
 /// 矢印/AB/Start/Select はこの定義に対応(上: bit0..3 は GC 的方向、bit4..7 は ボタン)
 @property (nonatomic) uint8_t pressedMask;
 
-/// 方向キー列($FF00 bit4=0 の選択)リクエスト
-@property (nonatomic) BOOL selectDirectionKeys;
-/// ボタン列($FF00 bit5=0 の選択)リクエスト
-@property (nonatomic) BOOL selectButtonKeys;
+/// $FF00 最終書込み値の bit5/4 ラッチ(読み戻し bit5/4 はこの値そのもの)。
+/// bit5/4=0 はセレクトライン駆動低(該当行が結線)を意味する。
+@property (nonatomic) uint8_t registerLatch;
 
 /// $FF00 読み取り値(押下 bit は反転される: 未押下=1)
 - (uint8_t)registerValue;

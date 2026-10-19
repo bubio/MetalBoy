@@ -202,8 +202,7 @@ NS_ASSUME_NONNULL_BEGIN
     switch (address) {
         case 0xFF00:
             if (joypad) {
-                joypad.selectDirectionKeys = ((value & 0x10) == 0); // bit4 = 0 で選択
-                joypad.selectButtonKeys = ((value & 0x20) == 0);
+                joypad.registerLatch = (value & 0x30); // bit5/4 は書込み値を読み戻す
             }
             break;
         case 0xFF01:

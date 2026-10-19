@@ -333,13 +333,60 @@ tima\_reload・tima\_write\_reloading・tma\_write\_reloading・div\_write・rap
 PASS**(旧 tim01 のみから 12 に)。
 `rapid_di_ei` は引き続き未解決。
 
-### Mooneye 結果(2026-10-19 第5弾時点)
+### Mooneye 結果(2026-10-19 第6弾時点)
 
-**52/75 PASS**(38/75 → 52/75)。追加 PASS:
-ei\_timing・ei\_sequence・reti\_intr\_timing・ie\_push・div\_write・tima\_reload・
-tima\_write\_reloading・tma\_write\_reloading・tim00・tim10・tim11・
-tim00\_div\_trigger・tim01\_div\_trigger・tim10\_div\_trigger・tim11\_div\_trigger・
-rapid\_toggle。
+**54/75 PASS**(52 → 54)。追加 PASS: stat\_irq\_blocking・stat\_lyc\_onoff。
+intr\_2\_mode0\_timing は STAT ラインエッジトリガ化でも維持。
+
+### 第6弾修正 8: STAT 割込みラインのエッジトリガ化
+
+`_statIrqLine` ivar で STAT 割込み要求ライン(型: 立込み時のみ IF bit1 を 1)。
+LCD OFF 中は `(stat & 0x40) && _coincidenceLatch` で駆動。これで
+stat\_irq\_blocking(STAT bit 連続書込みで朝起き割込みが潰れる挙動)と
+stat\_lyc\_onoff(LCD OFF 中 4 ラウンドの LYC 比較)が PASS。
+
+併せて:
+
+- STAT bit7 を常に 1 に(DMG 仕様)、LCD OFF 中モードビット=0・bit2=`_coincidenceLatch`
+  の凍結値(`statValue` = `0x80 | (stat & 0x78)`)。
+- `_coincidenceLatch`: LCD ON 中は毎 dot で `ly==lyc` を保存、OFF 中は凍結。
+
+### 第6弾修正 9: JOYPAD $FF00 の registerLatch 化とパレット電源投入既定
+
+- `selectDirectionKeys/selectButtonKeys` BOOL を廃止し `registerLatch`(0x30 マスク)に統一。
+  ioRead は bit7/6=1・bit5/4=ラッチ値・bit3-0=ラッチ駆動行(bit=0 駆動)の押下 OR。
+  電源投入既定 = **0x00**(DMG BIOS handover 値 $CF と整合; BIOS は P1 を書かない)。
+  ioWrite FF00 は `registerLatch = value & 0x30`。
+- PPU OBP0/OBP1 電源投入既定を 0xE4 → **0xFF**(BGP=0xFC は据え置き)。
+
+### boot クラスタ詳細計測(2026-10-19, 未解決)
+
+所見: 構造は実機相当、しかし BIOS 全体の実行長が実機想定より ~+6,269 dots(mod 65,536)長い。
+
+mbboot3(ラップ補正 TRUE dots 計測)による断:
+
+- boot\_div-dmg0 の DIV 読み(pc 0x017F/01BB/01F6/0232/026E/02AB の直後 A):
+  実測 **$31,$32,$33,$34,$35,$36** = divCounter 12684/12940/13192/13448/13704/13964。
+  gap = 256/252/256/256/260 dots = 64/63/64/64/65 M — **相対構造は完璧(CPU M 割出し OK)**。
+- 期待値(regs\_assert $FF89-90): B=$19 C=$1A D=$1A E=$1B H=$1C L=$1E。
+  目標リード1位相 ≡ 6401..6403 dots(mod 65,536)⇒ ハンドオーバ位相 ≡ **~6,185**。
+- 実測ハンドオーバ(pc 0x0100 fetch): **dots=24,785,064 ≡ 12,456 (mod 65,536)**、
+  DIV byte = $30。**差 = +6,269 dots ≈ +6,144(+1536 M)+~130** — boot\_hwio FF04($19 期待/$31 実測)
+  と同値系列。
+- BIOS 内ステージ: power-on → LCDON(pc 0x006B)は 269,932 dots(LCDC=$91 が電源投入既定なので
+  実質 no-op)、D ループ **132 ITER**(LD D,$64=100 + LD D,$20=32 の 2 相)、各 ITER は
+  SUB($00BC, e=2) を 1 回 + 残り code ≈ 128 dots。LCDON → h 24,515,132 dots = 349.1 frames。
+- SUB 内部(DEC C 連鎖): 44 dots 間隔で LY144 ウィンドウ内 8〜10 連鎖 → 残りは **FULL-FRAME
+  spin**(~69,804 dots を wrap 差引きで確認: mod 表記上 4,268 dots の間隔 = 4,268+65,536)。
+  つまり sub 構造 = 実機演算と同一(12 decs = 528 dots > 456 ウィンドウなので 8〜10 連鎖 +
+  1 フレーム待ちの断)。
+- **未解決の本質**: 全体が実機想定より ~+6,269 dots(mod 65,536)長い。sub・D ループ・
+  相対 M 構造は全て整合しているため、残る候補は「実機 DMG0 の電源投入時ラインクロック位相
+  (我々の dot 0 = LY0/dot0 とする仮定)」程度。gb-ctr(WIP)には電源投入位相の記載がないため
+  ハードオラクル無しには確定できない。
+- 併せて: boot\_regs-dmg0 PASS・boot\_hwio は FF04 のみ mismatch($31 vs $19)。FF00=$CF も PASS
+  (修正9の効果)、FF40/47/50・IE も PASS。
+
 
 ### 観測メモ: Tetris の約 40 秒以降の無音
 
@@ -355,6 +402,8 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
 - **timer クラス**(tim00/tim10/tim11・\*\_div\_trigger の一部・tima\_reload・div\_write):
   DIV/TIMA の立下り位相整合。rapid\_toggle・rapid\_di\_ei は参照実装でも既知の難関。
 - **boot\_div/boot\_hwio/boot\_regs-\*・boot\_sclk\_align**: BIOS ハンドオーバ時の
-  レジスタ/DIV 値の実機一致性。
+  レジスタ/DIV 値の実機一致性。**boot\_regs-dmg0 は PASS**(BIOS 供給ランナー)。
+  boot\_div・boot\_hwio は上記詳細計測の通り ~+6,269 dots の位相差のみ。
+  ハードオラクル(実機の電源投入時ライン位相)が得られない限り一旦 close。
 - **PPU stat/LCD 系**(stat\_irq\_blocking・lcdon\_timing・\*-GS 等): PPU 精密化後の課題。
 - **Tetris 約40秒以降の無音**(上記観測メモ)。

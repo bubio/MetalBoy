@@ -30,6 +30,8 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     MBPPUMode _mode;
     uint32_t _dotsInMode;
     BOOL _frameSignaled;
+    BOOL _statIrqLine;       // 内部 STAT 割込みライン(エッジ判定用)
+    BOOL _coincidenceLatch;  // LCD OFF 中に保持される LY==LYC 最終比較結果
 }
 @property (nonatomic, readwrite, strong) NSMutableData *framebuffer;
 @property (nonatomic, readwrite) NSUInteger completedFrameCount;
@@ -50,14 +52,16 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _oam = [NSMutableData dataWithLength:0xA0];
         _lcdc = kDefaultLCDC;
         _bgp = 0xE4;
-        _obp0 = 0xE4;
-        _obp1 = 0xE4;
+        _obp0 = 0xFF; // 電源投入既定(実機: 未書込の OBP0/OBP1 は $FF)
+        _obp1 = 0xFF;
         _ly = 0;
         _stat = 0x00;
         _mode = MBPPUModeOAMScan;
         _dotsInMode = 0;
         _completedFrameCount = 0;
         _frameSignaled = NO;
+        _statIrqLine = NO;
+        _coincidenceLatch = NO;
     }
     return self;
 }
@@ -90,9 +94,14 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 }
 
 - (uint8_t)statValue {
-    uint8_t result = (uint8_t)(_stat & 0xF8);
-    result |= (uint8_t)(_mode & 0x03);
-    if (self.lcdc & 0x80 && _ly == self.lyc) result |= 0x04;
+    uint8_t result = (uint8_t)(0x80 | (_stat & 0x78)); // bit7 は常時 1(実機仕様)
+    if (self.lcdc & 0x80) {
+        result |= (uint8_t)(_mode & 0x03);
+        if (_ly == self.lyc) result |= 0x04;
+    } else {
+        // LCD OFF: モード読出し 0・比較クロック停止(latch 保持)
+        if (_coincidenceLatch) result |= 0x04;
+    }
     return result;
 }
 
@@ -167,14 +176,22 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 }
 
 - (void)fireSTATIfRequest:(uint8_t *)ifRequest {
-    uint8_t sources = _stat; // bit6, bit5, bit4 有効化
-    BOOL coincidence = (_ly == self.lyc);
-    BOOL fire = NO;
-    if ((sources & 0x40) && coincidence) fire = YES;
-    if ((sources & 0x20) && _mode == MBPPUModeOAMScan) fire = YES;
-    if ((sources & 0x10) && _mode == MBPPUModeVBlank) fire = YES;
-    if ((sources & 0x08) && _mode == MBPPUModeHBlank) fire = YES;
-    if (fire && ifRequest) *ifRequest |= 0x02;
+    // STAT 割込みライン = 発生源条件の OR。IF bit1 はラインの立下がりのみで立てる
+    // (エッジトリガ: 十分に残り続ける限り同じ発生源では再発火しない = stat_irq_blocking)。
+    // LCD OFF 中は比較クロック停止。モード読出し 0・LY==LYC は latch で保持(stat_lyc_onoff)。
+    BOOL line;
+    if (self.lcdc & 0x80) {
+        BOOL coincidence = (_ly == self.lyc);
+        _coincidenceLatch = coincidence; // OFF 遷移時の保持値を常時更新
+        line = (((_stat & 0x08) && _mode == MBPPUModeHBlank)
+             || ((_stat & 0x10) && _mode == MBPPUModeVBlank)
+             || ((_stat & 0x20) && _mode == MBPPUModeOAMScan)
+             || ((_stat & 0x40) && coincidence));
+    } else {
+        line = ((_stat & 0x40) && _coincidenceLatch);
+    }
+    if (line && !_statIrqLine && ifRequest) *ifRequest |= 0x02;
+    _statIrqLine = line;
 }
 
 #pragma mark - 描画(1 ライン = 160 ピクセル)
