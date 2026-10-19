@@ -101,7 +101,9 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (void)write8:(uint8_t)value address:(uint16_t)address {
-    // OAM DMA 中の OAM 書き込み衝突(実機: 無視)
+    // OAM DMA 中の OAM 書き込み衝突(実機: 捨てられる)。
+    // 抑止ウィンドウは読出し側(dmaActive=M_{w+2}..M_{w+161})と同一
+    // (Mooneye push_timing.s: 2 ラウンドの push/pop から規定)。
     if (_dmaActive && address >= 0xFE00 && address <= 0xFE9F) {
         return;
     }
@@ -244,7 +246,11 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - OAM DMA
 
 /// 1 M-cycle ぶん OAM DMA を進める。
-/// M0(書込み, delay=2 セット)→ M1(何もしない)→ M2(転送開始)→ 160 M-cycle で 1バイト/M
+/// M0(書込み, delay=2 セット)→ M1(何もしない)→ M2(転送開始: active 化のみ、
+/// byte0 は M3 の終端 tick から書込む=byte k は M_{w+2+k} の終端で OAM に載る。
+/// これで Mooneye oam_dma_start「M2 で OAM 読み出しは FF」と oam_dma_restart の
+/// 終端境界(最終 byte の M そのものに CPU 読み出しが重なると FF、
+/// その 1 M-cycle 後は OAM に載った値が読める)の両方を満たす)
 - (void)dmaTickOneMCycle {
     if (_dmaStartDelay > 0) {
         _dmaStartDelay -= 1;
@@ -252,6 +258,7 @@ NS_ASSUME_NONNULL_BEGIN
             _dmaActive = YES;
             _dmaSource = _dmaPendingSource;
             _dmaIndex = 0;
+            return; // 開始 tick では転送しない(隔離 M)
         }
     }
     if (_dmaActive) {

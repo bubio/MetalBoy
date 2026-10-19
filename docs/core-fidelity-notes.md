@@ -250,20 +250,55 @@ mts-20260714-0944-31510e1、acceptance 75 本)をオラクルとして追加。
 - 付随修正: 旧実装は OAM 領域への直接読み書き(ioRead/ioWrite 経由)が完全に落ちていた
   ので実装(PPU readOAM/writeOAM に接続)。
 
-### Mooneye 結果(2026-10-19 時点)
+### 修正 4: OAM DMA の byte 書込み位置の 1 M-cycle 精密化(2026-10-19 第4弾)
 
-**23/75 PASS**(10/75 → 23/75)。追加 PASS:
-oam_dma/basic・oam_dma/reg_read・oam_dma_start・pop_timing・add_interrupt系
-(intr_1_2/intr_2_0/intr_2_mode0/intr_2_mode3)・halt_ime0_ei・halt_ime1_timing2-GS・
-mem_oam・reg_f・tim01・halt_ime0_nointr_timing・di_timing-GS。
+`oam_dma_restart`(以後 39 回の dec/jr ループから `ld a,(hl)`)が失败していたため、
+一時計装(環境変数 MB_DMA_LOG ゲート、プロダクトからは削除済み)で byte 書込みの
+絶対 M 位置と CPU OAM 読み出し位置を可視化して特定した:
+
+- **旧実装**: 開始(delay=0 消化)の tick で active 化 **と byte0 書込み**を同 tick で
+  行う byte k = M\_{w+1+k} に載る。このため byte159 の書込み M/読出し FF ウィンドウ
+  が 1 M-cycle 早く閉じ、テスト想定の「最終 byte の M そのものに重なると FF」が満たない。
+- **新実装**: 開始 tick では active 化のみ(隔離 1 M)、byte0 は次の tick から。
+  byte k は M\_{w+2+k} の終端 tick で OAM に載る。
+  - 読出し FF ウィンドウ = **M\_{w+2}..M\_{w+161}**(byte159 の書込み M そのものまで FF、
+    その 1 M-cycle 後は載った値を読める)
+- これで `oam_dma_restart`・`oam_dma_timing` が PASS。
+- **push_timing**(DMA 完了直後に PUSH し、書込みが捨てられるか確認するテスト)も
+  通過。書込み側の判定は読出し FF ウィンドウ(dmaActive)と同一で、追加テールは不要
+  と確認した。
+
+調査中に「書込み抑止テール(+4 M-cycle)」を一時実装したが、`start_oam_dma` マクロ内の
+`wait_vblank` とその直後の `ld a,39`(2M)+ 39 回ループ(38×4+3=155 M-cycle)を正しく
+数え直すと push の M2/M3 書込み位置は M\_{w+161}/M\_{w+162} となり、既存ウィンドウと
+一致するため撤去した。
+
+回帰テスト: `Tests/MBMemoryMapDMATests.m`(新規 3 本、計 69 本に増加)。
+
+### Mooneye 結果(2026-10-19 第4弾時点)
+
+**38/75 PASS**(23/75 → 38/75)。追加 PASS:
+oam\_dma\_restart・oam\_dma\_timing・push\_timing・add\_sp\_e\_timing・
+call\_timing・call\_timing2・call\_cc\_timing・call\_cc\_timing2・
+jp\_timing・jp\_cc\_timing(命令 timing クラス 10 本)。
+
+引き続き `blargg cpu_instrs 11/11`・単体テスト 69/69・Tetris 音声統計(1200F/2400F)を
+変更前とビット単位で同一を確認(リグレッションなし)。
+
+### 観測メモ: Tetris の約 40 秒以降の無音
+
+変更前後で同一のため DMA 修正の影響ではない。1200F(20秒)では BGM nonzero 88.8%。
+4800F(80秒)以降は APU 出力が完全に 0 になる。APU の長時間再生での何か(チャンネル停止?
+length カウンタ悪用? または検証ツール側の録音区間の問題)が疑われるため、
+次の調査候補として残す。
 
 ### 既知の未通過(精密化バックログ)
 
-- **命令 timing クラス**(call/jp/ret/rst/push/ei/intr_2_oam_ok 等): OAM DMA 競合を
-  1 M-cycle 精度で観測する方法で、バス競合位置の更なる 1 cycle 精度が要る。
-- **oam_dma_restart/oam_dma_timing**: 転送終端のちょうど前後 1 M-cycle の境界値。
-- **timer クラス**(tim00/tim10/tim11・*_div_trigger の一部・tima_reload・div_write):
-  DIV/TIMA の立ち下がり位相整合。rapid_toggle は参照実装でも既知の難関。
-- **boot_div/boot_hwio/boot_regs-mgb・sgb**: BIOS ハンドオーバ時のレジスタ/DIV 値の
-  実機一致性(MGB/SGB は対象モデル外)。
-- **PPU stat/LCD 系**(stat_irq_blocking・lcdon_timing 等): PPU 精密化後の課題。
+- **指示 timing クラス**(ret/rst/ei/intr 系): ei\_timing・ei\_sequence・reti\_intr\_timing・
+  ie\_push は未通過。割込みディスパッチ/IME 更新タイミングの 1 cycle 精度が要る。
+- **timer クラス**(tim00/tim10/tim11・\*\_div\_trigger の一部・tima\_reload・div\_write):
+  DIV/TIMA の立下り位相整合。rapid\_toggle・rapid\_di\_ei は参照実装でも既知の難関。
+- **boot\_div/boot\_hwio/boot\_regs-\*・boot\_sclk\_align**: BIOS ハンドオーバ時の
+  レジスタ/DIV 値の実機一致性。
+- **PPU stat/LCD 系**(stat\_irq\_blocking・lcdon\_timing・\*-GS 等): PPU 精密化後の課題。
+- **Tetris 約40秒以降の無音**(上記観測メモ)。
