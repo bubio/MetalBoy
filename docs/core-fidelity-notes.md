@@ -204,3 +204,66 @@ Tetris(実 BIOS 駆動)の停滞をpc 系ヒストグラム/待機ループの L
   2. AppDelegate のモニタはゲームキー(修飾キー無し)を消費(nil 返し)。Cmd/Ctrl/Option
      併用はメニュー優先で WAS 消費しない
 - ※ ユーザ側での耳での確認待ち(キービープ抑制)。
+
+## 10. M-cycle 割出し CPU + OAM DMA 逐次転送エンジン(2026-10-19 第3弾)
+
+### 背景: Mooneye テストスイートの採用
+
+Gekkio mooneye-test-suite の prebuilt ROM(`https://gekkio.fi/files/mooneye-test-suite/`
+mts-20260714-0944-31510e1、acceptance 75 本)をオラクルとして追加。
+判定は quit プロトコルのシリアルダンプ成功 = `03 05 08 0D 15 22`(Fibonacci)、
+失敗 = `42`×6。検証ツールは `/tmp/mbmooneye.m`(実 ROM デバッグ用でプロダクトに含めない)。
+
+引き上げ前ベースライン: **10/75 PASS**。
+
+### 修正 1: 命令ごとの合計 M-cycle 値の修正
+
+- ALU $80-$BF reg→reg が一律 2 → reg は 1、(HL) 参照は 2
+- CB 命令が一律 2 → BIT は reg=2/(HL)=3、rotate・RES/SET は reg=2/(HL)=4
+- POP $C1/$D1/$E1/$F1 が 4 → **3**
+
+### 修正 2: M-cycle 単位のバス操作割出し(stepWithBus の全面改修)
+
+従来は命令実行後の最後にまとめて N M-cycle をバスへ供給しており、命令内の
+「どの M-cycle でメモリアクセスが起こるか」が実機とずれていた。
+実機位置合わせへ作り直し:
+
+- **すべてのバス操作の直後に 1 M-cycle を emit**(命令フェッチ込み)。
+  `_ticksDone` で命令内の既 emit 数を追跡し、最後に内部遅延分のみ追加送出
+  (`finishTicks`)する。
+- メモリアクセスを伴わない M-cycle(内部遅延)は実機位置で挟む:
+  PUSH/CALL/RST は「opcode → 内部 M → w,w」、RET cc(taken) は
+  「opcode → 内部 M → r,r → 内部 M」、割込みディスパッチは
+  「内部 M×2 → PC push → 内部 M」。
+- tic 型は Pan Docs / BubiBoyLite の各命令 M-cycle 表と突き合わせ済み。
+
+### 修正 3: OAM DMA($FF46)の逐次転送エンジン
+
+`MBMemoryMap` に状態機械を実装(BubiBoyLite `bus.odin dma_tick_one_mcycle` 準拠):
+
+- $FF46 書込みで `dmaStartDelay=2` セット。M2 で旧転送を打ち切って新規転送開始。
+- 1 バイト/M-cycle で 160 M-cycle かけて :source 読出 → OAM 書込。
+- **バス競合**: DMA 中の OAM($FE00-$FE9F)への CPU 読み出し=0xFF、書込み=無視。
+  (HRAM・IO・WRAM・VRAM 等は通常どおり可能。BubiBoyLite の改良版モデルと同一)
+- DMA 自身のソース読み出しは競合ゲートを素通り(dmaRawRead)。
+- $FF46 読み戻しは「最後に書き込んだ値」を返す(Mooneye reg_read 仕様)。
+- 付随修正: 旧実装は OAM 領域への直接読み書き(ioRead/ioWrite 経由)が完全に落ちていた
+  ので実装(PPU readOAM/writeOAM に接続)。
+
+### Mooneye 結果(2026-10-19 時点)
+
+**23/75 PASS**(10/75 → 23/75)。追加 PASS:
+oam_dma/basic・oam_dma/reg_read・oam_dma_start・pop_timing・add_interrupt系
+(intr_1_2/intr_2_0/intr_2_mode0/intr_2_mode3)・halt_ime0_ei・halt_ime1_timing2-GS・
+mem_oam・reg_f・tim01・halt_ime0_nointr_timing・di_timing-GS。
+
+### 既知の未通過(精密化バックログ)
+
+- **命令 timing クラス**(call/jp/ret/rst/push/ei/intr_2_oam_ok 等): OAM DMA 競合を
+  1 M-cycle 精度で観測する方法で、バス競合位置の更なる 1 cycle 精度が要る。
+- **oam_dma_restart/oam_dma_timing**: 転送終端のちょうど前後 1 M-cycle の境界値。
+- **timer クラス**(tim00/tim10/tim11・*_div_trigger の一部・tima_reload・div_write):
+  DIV/TIMA の立ち下がり位相整合。rapid_toggle は参照実装でも既知の難関。
+- **boot_div/boot_hwio/boot_regs-mgb・sgb**: BIOS ハンドオーバ時のレジスタ/DIV 値の
+  実機一致性(MGB/SGB は対象モデル外)。
+- **PPU stat/LCD 系**(stat_irq_blocking・lcdon_timing 等): PPU 精密化後の課題。

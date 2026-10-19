@@ -30,6 +30,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL serialTransferStart; // $FF02 bit7
 @property (nonatomic) int32_t serialTransferCounter;
 @property (nonatomic) uint8_t latchedSCBits;   // $FF02 bit1(clock source)簡易
+// OAM DMA($FF46)。逐次転送(1バイト/M-cycle、開始に 2 M-cycle 遅延)。
+// 参照実装: BubiBoyLite bus.odin dma_tick_one_mcycle / Mooneye oam_dma_start.s
+@property (nonatomic) BOOL dmaActive;
+@property (nonatomic) uint16_t dmaPendingSource; // dmaStartDelay 消化後に dmaSource へ反映
+@property (nonatomic) uint16_t dmaSource;
+@property (nonatomic) NSUInteger dmaIndex;       // 転送済みバイト数(0..159)
+@property (nonatomic) int32_t dmaStartDelay;     // 開始までの残り M-cycle(0=保留なし)
+@property (nonatomic) uint8_t dmaLastWrite;      // $FF46 読み戻し(最後に書き込んだ値)
 @end
 
 @implementation MBMemoryMap
@@ -63,6 +71,10 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - read/write
 
 - (uint8_t)read8:(uint16_t)address {
+    // OAM DMA 中の OAM 読み出し衝突(実機: 0xFF を返す。BubiBoyLite bus_read 同)
+    if (_dmaActive && address >= 0xFE00 && address <= 0xFE9F) {
+        return 0xFF;
+    }
     if (address < 0x8000) {
         return [(id)self.cartridgeTarget romByteAtAddress:address];
     }
@@ -89,6 +101,10 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (void)write8:(uint8_t)value address:(uint16_t)address {
+    // OAM DMA 中の OAM 書き込み衝突(実機: 無視)
+    if (_dmaActive && address >= 0xFE00 && address <= 0xFE9F) {
+        return;
+    }
     if (address < 0x8000) {
         [(id)self.cartridgeTarget writeControlByte:value atAddress:address];
         return;
@@ -123,6 +139,12 @@ NS_ASSUME_NONNULL_BEGIN
     MBPPU *ppu = self.ppuTarget;
     MBApu *apu = self.apuTarget;
     MBJoypad *joypad = self.joypadTarget;
+    if (address <= 0xFE9F) {
+        return [ppu readOAM:(uint16_t)(address - 0xFE00)];
+    }
+    if (address <= 0xFEFF) {
+        return 0xFF; // $FEA0-$FEFF 未使用
+    }
     switch (address) {
         case 0xFF00: return (joypad ? [joypad registerValue] : 0xFF);
         case 0xFF01: return _serialData;
@@ -138,6 +160,7 @@ NS_ASSUME_NONNULL_BEGIN
         case 0xFF43: return ppu ? ppu.scx : 0xFF;
         case 0xFF44: return ppu ? ppu.ly : 0xFF;
         case 0xFF45: return ppu ? ppu.lyc : 0xFF;
+        case 0xFF46: return _dmaLastWrite; // 読み戻しは最後に書き込んだ値(Mooneye oam_dma/reg_read)
         case 0xFF47: return ppu ? ppu.bgp : 0xFF;
         case 0xFF48: return ppu ? ppu.obp0 : 0xFF;
         case 0xFF49: return ppu ? ppu.obp1 : 0xFF;
@@ -156,6 +179,10 @@ NS_ASSUME_NONNULL_BEGIN
     MBPPU *ppu = self.ppuTarget;
     MBApu *apu = self.apuTarget;
     MBJoypad *joypad = self.joypadTarget;
+    if (address <= 0xFE9F) {
+        if (ppu) [ppu writeOAM:value address:(uint16_t)(address - 0xFE00)];
+        return;
+    }
     switch (address) {
         case 0xFF00:
             if (joypad) {
@@ -192,12 +219,11 @@ NS_ASSUME_NONNULL_BEGIN
         case 0xFF43: if (ppu) ppu.scx = value; break;
         case 0xFF45: if (ppu) ppu.lyc = value; break;
         case 0xFF46: {
-            // OAM DMA: $FE00 に 40 バイト転送(簡易: 同期)
-            uint16_t srcBase = (uint16_t)(value << 8);
-            for (uint16_t i = 0; i < 0xA0; i++) {
-                uint8_t b = [self read8:(uint16_t)(srcBase + i)];
-                [self.ppuTarget writeOAM:b address:i];
-            }
+            // OAM DMA: 開始は 2 M-cycle 後(実行中の転送はそのまま継続し、
+            // 遅延消化後に新規転送が打ち切り開始される=BubiBoyLite dma_tick_one_mcycle)
+            _dmaLastWrite = value;
+            _dmaPendingSource = (uint16_t)(value << 8);
+            _dmaStartDelay = 2;
             break;
         }
         case 0xFF47: if (ppu) ppu.bgp = value; break;
@@ -213,6 +239,39 @@ NS_ASSUME_NONNULL_BEGIN
             }
             break;
     }
+}
+
+#pragma mark - OAM DMA
+
+/// 1 M-cycle ぶん OAM DMA を進める。
+/// M0(書込み, delay=2 セット)→ M1(何もしない)→ M2(転送開始)→ 160 M-cycle で 1バイト/M
+- (void)dmaTickOneMCycle {
+    if (_dmaStartDelay > 0) {
+        _dmaStartDelay -= 1;
+        if (_dmaStartDelay == 0) {
+            _dmaActive = YES;
+            _dmaSource = _dmaPendingSource;
+            _dmaIndex = 0;
+        }
+    }
+    if (_dmaActive) {
+        uint16_t src = (uint16_t)(_dmaSource + _dmaIndex);
+        uint8_t value = [self dmaRawRead:src];
+        [self.ppuTarget writeOAM:value address:(uint16_t)_dmaIndex];
+        _dmaIndex += 1;
+        if (_dmaIndex >= 0xA0) {
+            _dmaActive = NO;
+        }
+    }
+}
+
+/// DMA 自身のソース読み出しは OAM 衝突ゲートを通らない(bus_read_raw 相当)
+- (uint8_t)dmaRawRead:(uint16_t)address {
+    BOOL saved = _dmaActive;
+    _dmaActive = NO;
+    uint8_t value = [self read8:address];
+    _dmaActive = saved;
+    return value;
 }
 
 #pragma mark - tick
@@ -245,6 +304,7 @@ NS_ASSUME_NONNULL_BEGIN
         _serialTransferStart = NO;
         _ifRegister |= 0x08; // serial interrupt
     }
+    [self dmaTickOneMCycle];
 }
 
 #pragma mark - property 再生成(read/write 单纯)

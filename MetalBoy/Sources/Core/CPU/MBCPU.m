@@ -66,6 +66,7 @@ static inline uint16_t Add16NoZero(uint16_t a, uint16_t b, uint8_t *outFlags) {
 @property (nonatomic) BOOL ime;
 @property (nonatomic) BOOL imeDelayed;
 @property (nonatomic) BOOL halted;
+@property (nonatomic) NSUInteger ticksDone; // 直近命令で既に吐き出した M-cycle 数
 @end
 
 @implementation MBCPU
@@ -111,9 +112,14 @@ static inline uint16_t Add16NoZero(uint16_t a, uint16_t b, uint8_t *outFlags) {
 
 #pragma mark - fetch helpers
 
+// M-cycle 単位のティック割出し(実機位置合わせ):
+// すべてのバス操作(命令フェッチ込み)の直後に 1 M-cycle 分 cpuTickCycle を起こす。
+// 合計 M-cycle は stepWithBus 冒頭で _ticksDone=0 にし、最後に tickBusTimes(count: -)で
+// 内部遅延分のみ追加吐き出しする。
 static inline uint8_t CPUFetch8(MBCPU *self, id<MBCPUBus> bus) {
     uint8_t value = [bus cpuReadAddress:self->_pc];
     self->_pc++;
+    [self tickM:bus];
     return value;
 }
 
@@ -125,13 +131,17 @@ static inline uint16_t CPUFetch16(MBCPU *self, id<MBCPUBus> bus) {
 
 static inline void CPUPush16(MBCPU *self, id<MBCPUBus> bus, uint16_t value) {
     [bus cpuWrite:(uint8_t)(value >> 8)  address:(uint16_t)(self->_sp - 1)];
+    [self tickM:bus];
     [bus cpuWrite:(uint8_t)(value & 0xFF) address:(uint16_t)(self->_sp - 2)];
+    [self tickM:bus];
     self->_sp -= 2;
 }
 
 static inline uint16_t CPUPop16(MBCPU *self, id<MBCPUBus> bus) {
     uint16_t low = [bus cpuReadAddress:self->_sp];
+    [self tickM:bus];
     uint16_t high = [bus cpuReadAddress:(uint16_t)(self->_sp + 1)];
+    [self tickM:bus];
     self->_sp += 2;
     return (uint16_t)(low | (uint16_t)(high << 8));
 }
@@ -150,7 +160,11 @@ static inline uint8_t Get8R(MBCPU *self, NSUInteger idx, id<MBCPUBus> bus) {
         case 3: return self->_regE;
         case 4: return self->_regH;
         case 5: return self->_regL;
-        case 6: return [bus cpuReadAddress:Hl(self)];
+        case 6: {
+            uint8_t value = [bus cpuReadAddress:Hl(self)];
+            [self tickM:bus];
+            return value;
+        }
         default: return self->_regA;
     }
 }
@@ -163,7 +177,10 @@ static inline void Set8R(MBCPU *self, NSUInteger idx, uint8_t value, id<MBCPUBus
         case 3: self->_regE = value; break;
         case 4: self->_regH = value; break;
         case 5: self->_regL = value; break;
-        case 6: [bus cpuWrite:value address:Hl(self)]; break;
+        case 6:
+            [bus cpuWrite:value address:Hl(self)];
+            [self tickM:bus];
+            break;
         default: self->_regA = value; break;
     }
 }
@@ -203,6 +220,7 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
 - (NSUInteger)stepWithBus:(id<MBCPUBus>)bus {
     if (_imeDelayed) _ime = YES;
     _imeDelayed = NO;
+    _ticksDone = 0;
 
     // 割り込みサービス(実機仕様: IME=1 かつ (IF & IE) != 0 のときだけ発生)
     uint8_t ifReg = [bus ifRegister];
@@ -211,12 +229,14 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         for (NSInteger i = 0; i < 5; i++) {
             if (serviceable & kIFBits[i]) {
                 _ime = NO;
-                CPUPush16(self, bus, _pc);
+                uint16_t returnPC = _pc;
+                // 実機: 2 internal + PC push(W,W=push 内で tick)+ 1 internal の 5 M-cycle
+                [self tickBusTimes:bus count:2];
+                CPUPush16(self, bus, returnPC);
                 _pc = kIFVectors[i];
                 [bus setIfRegister:(uint8_t)(ifReg & ~kIFBits[i])];
                 _halted = NO;
-                // 割込み受付〜ベクタ転送の 20 T-cycle 分もバス(PPU/APU/timer)を進める
-                [self tickBusTimes:bus count:5];
+                [self tickBusTimes:bus count:1];
                 return 5;
             }
         }
@@ -305,7 +325,13 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
                 Set8R(self, src, result, bus);
             } break;
         }
-        [self tickBusTimes:bus count:cycleCount];
+        // M-cycle: reg 対象は rotate/shift・RES/SET=2・BIT=2、(HL) 対象は BIT=3・それ以外=4
+        if (x == 1) {
+            cycleCount = (src == 6) ? 3 : 2;
+        } else {
+            cycleCount = (src == 6) ? 4 : 2;
+        }
+        [self finishTicks:cycleCount bus:bus];
         return cycleCount;
     }
 
@@ -316,7 +342,7 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         uint8_t value = Get8R(self, src, bus);
         Set8R(self, dst, value, bus);
         NSUInteger count = (src == 6 || dst == 6) ? 2 : 1;
-        [self tickBusTimes:bus count:count];
+        [self finishTicks:count bus:bus];
         return count;
     }
 
@@ -336,7 +362,7 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
             case 0xFE: SubBytes(_regA, value, 0, &flags); _regF = flags; break;
         }
         cycleCount = 2;
-        [self tickBusTimes:bus count:cycleCount];
+        [self finishTicks:cycleCount bus:bus];
         return cycleCount;
     }
 
@@ -353,8 +379,8 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         else if (opcode < 0xB0) { _regA ^= value; _regF = (uint8_t)(_regA == 0 ? FLAG_Z : 0); }
         else if (opcode < 0xB8) { _regA |= value; _regF = (uint8_t)(_regA == 0 ? FLAG_Z : 0); }
         else { SubBytes(_regA, value, 0, &flags); _regF = flags; }
-        cycleCount = 2; // 単純化: register→register 1、(HL) 参照で追加(簡易で 2)
-        [self tickBusTimes:bus count:cycleCount];
+        cycleCount = (src == 6) ? 2 : 1; // reg→reg は 1、(HL) 参照は 2
+        [self finishTicks:cycleCount bus:bus];
         return cycleCount;
     }
 
@@ -368,8 +394,8 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0x31: { _sp = CPUFetch16(self, bus); cycleCount = 3; } break;
 
         // store A through register pairs
-        case 0x02: [bus cpuWrite:_regA address:Bc(self)]; cycleCount = 2; break;
-        case 0x12: [bus cpuWrite:_regA address:De(self)]; cycleCount = 2; break;
+        case 0x02: [bus cpuWrite:_regA address:Bc(self)]; [self tickM:bus]; cycleCount = 2; break;
+        case 0x12: [bus cpuWrite:_regA address:De(self)]; [self tickM:bus]; cycleCount = 2; break;
 
         // INC/DEC r
         case 0x04: IncR(self, 0, bus); cycleCount = 1; break;
@@ -399,20 +425,20 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0x3E: _regA = CPUFetch8(self, bus); cycleCount = 2; break;
 
         // LD (nn), A
-        case 0xEA: { uint16_t addr = CPUFetch16(self, bus); [bus cpuWrite:_regA address:addr]; cycleCount = 4; } break;
-        case 0xFA: { uint16_t addr = CPUFetch16(self, bus); _regA = [bus cpuReadAddress:addr]; cycleCount = 4; } break;
+        case 0xEA: { uint16_t addr = CPUFetch16(self, bus); [bus cpuWrite:_regA address:addr]; [self tickM:bus]; cycleCount = 4; } break;
+        case 0xFA: { uint16_t addr = CPUFetch16(self, bus); _regA = [bus cpuReadAddress:addr]; [self tickM:bus]; cycleCount = 4; } break;
 
         // LDH (a8), A / A, (a8)
-        case 0xE0: { uint8_t lo = CPUFetch8(self, bus); [bus cpuWrite:_regA address:(uint16_t)(0xFF00 | lo)]; cycleCount = 3; } break;
-        case 0xF0: { uint8_t lo = CPUFetch8(self, bus); _regA = [bus cpuReadAddress:(uint16_t)(0xFF00 | lo)]; cycleCount = 3; } break;
+        case 0xE0: { uint8_t lo = CPUFetch8(self, bus); [bus cpuWrite:_regA address:(uint16_t)(0xFF00 | lo)]; [self tickM:bus]; cycleCount = 3; } break;
+        case 0xF0: { uint8_t lo = CPUFetch8(self, bus); _regA = [bus cpuReadAddress:(uint16_t)(0xFF00 | lo)]; [self tickM:bus]; cycleCount = 3; } break;
 
         // LDH (C), A / LDH A, (C)
-        case 0xE2: [bus cpuWrite:_regA address:(uint16_t)(0xFF00 | _regC)]; cycleCount = 2; break;
-        case 0xF2: _regA = [bus cpuReadAddress:(uint16_t)(0xFF00 | _regC)]; cycleCount = 2; break;
+        case 0xE2: [bus cpuWrite:_regA address:(uint16_t)(0xFF00 | _regC)]; [self tickM:bus]; cycleCount = 2; break;
+        case 0xF2: _regA = [bus cpuReadAddress:(uint16_t)(0xFF00 | _regC)]; [self tickM:bus]; cycleCount = 2; break;
 
         // LD (BC)/(DE), A
-        case 0x0A: _regA = [bus cpuReadAddress:Bc(self)]; cycleCount = 2; break;
-        case 0x1A: _regA = [bus cpuReadAddress:De(self)]; cycleCount = 2; break;
+        case 0x0A: _regA = [bus cpuReadAddress:Bc(self)]; [self tickM:bus]; cycleCount = 2; break;
+        case 0x1A: _regA = [bus cpuReadAddress:De(self)]; [self tickM:bus]; cycleCount = 2; break;
 
         // INC / DEC rp
         case 0x03: { uint16_t v = (uint16_t)(Bc(self) + 1); _regB = (uint8_t)(v >> 8); _regC = (uint8_t)v; cycleCount = 2; } break;
@@ -505,23 +531,23 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         // (0x40-0x7F は switch 直前の if ブロックで処理する)
 
         // LD (HL),n8
-        case 0x36: { uint8_t value = CPUFetch8(self, bus); [bus cpuWrite:value address:Hl(self)]; cycleCount = 3; } break;
+        case 0x36: { uint8_t value = CPUFetch8(self, bus); [bus cpuWrite:value address:Hl(self)]; [self tickM:bus]; cycleCount = 3; } break;
 
         // LD A,(HLD)/(HLI)
-        case 0x2A: { _regA = [bus cpuReadAddress:Hl(self)]; uint16_t v = (uint16_t)(Hl(self) + 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
-        case 0x3A: { _regA = [bus cpuReadAddress:Hl(self)]; uint16_t v = (uint16_t)(Hl(self) - 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
-        case 0x22: { [bus cpuWrite:_regA address:Hl(self)]; uint16_t v = (uint16_t)(Hl(self) + 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
-        case 0x32: { [bus cpuWrite:_regA address:Hl(self)]; uint16_t v = (uint16_t)(Hl(self) - 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
+        case 0x2A: { _regA = [bus cpuReadAddress:Hl(self)]; [self tickM:bus]; uint16_t v = (uint16_t)(Hl(self) + 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
+        case 0x3A: { _regA = [bus cpuReadAddress:Hl(self)]; [self tickM:bus]; uint16_t v = (uint16_t)(Hl(self) - 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
+        case 0x22: { [bus cpuWrite:_regA address:Hl(self)]; [self tickM:bus]; uint16_t v = (uint16_t)(Hl(self) + 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
+        case 0x32: { [bus cpuWrite:_regA address:Hl(self)]; [self tickM:bus]; uint16_t v = (uint16_t)(Hl(self) - 1); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 2; } break;
 
         // PUSH / POP
-        case 0xC5: CPUPush16(self, bus, Bc(self)); cycleCount = 4; break;
-        case 0xD5: CPUPush16(self, bus, De(self)); cycleCount = 4; break;
-        case 0xE5: CPUPush16(self, bus, Hl(self)); cycleCount = 4; break;
-        case 0xF5: CPUPush16(self, bus, (uint16_t)((_regA << 8) | _regF)); cycleCount = 4; break;
-        case 0xC1: { uint16_t v = CPUPop16(self, bus); _regB = (uint8_t)(v >> 8); _regC = (uint8_t)v; cycleCount = 4; } break;
-        case 0xD1: { uint16_t v = CPUPop16(self, bus); _regD = (uint8_t)(v >> 8); _regE = (uint8_t)v; cycleCount = 4; } break;
-        case 0xE1: { uint16_t v = CPUPop16(self, bus); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 4; } break;
-        case 0xF1: { uint16_t v = CPUPop16(self, bus); _regA = (uint8_t)(v >> 8); _regF = (uint8_t)(v & 0xF0); cycleCount = 4; } break;
+        case 0xC5: [self tickM:bus]; CPUPush16(self, bus, Bc(self)); cycleCount = 4; break;
+        case 0xD5: [self tickM:bus]; CPUPush16(self, bus, De(self)); cycleCount = 4; break;
+        case 0xE5: [self tickM:bus]; CPUPush16(self, bus, Hl(self)); cycleCount = 4; break;
+        case 0xF5: [self tickM:bus]; CPUPush16(self, bus, (uint16_t)((_regA << 8) | _regF)); cycleCount = 4; break;
+        case 0xC1: { uint16_t v = CPUPop16(self, bus); _regB = (uint8_t)(v >> 8); _regC = (uint8_t)v; cycleCount = 3; } break;
+        case 0xD1: { uint16_t v = CPUPop16(self, bus); _regD = (uint8_t)(v >> 8); _regE = (uint8_t)v; cycleCount = 3; } break;
+        case 0xE1: { uint16_t v = CPUPop16(self, bus); _regH = (uint8_t)(v >> 8); _regL = (uint8_t)v; cycleCount = 3; } break;
+        case 0xF1: { uint16_t v = CPUPop16(self, bus); _regA = (uint8_t)(v >> 8); _regF = (uint8_t)(v & 0xF0); cycleCount = 3; } break;
 
         // JP nn / JP cc /
         case 0xC3: { _pc = CPUFetch16(self, bus); cycleCount = 4; } break;
@@ -541,24 +567,25 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         } break;
 
         // CALL / CALL cc /
-        case 0xCD: { uint16_t target = CPUFetch16(self, bus); CPUPush16(self, bus, _pc); _pc = target; cycleCount = 6; } break;
+        case 0xCD: { uint16_t target = CPUFetch16(self, bus); [self tickM:bus]; CPUPush16(self, bus, _pc); _pc = target; cycleCount = 6; } break;
         case 0xC4: case 0xCC: case 0xD4: case 0xDC: {
             NSUInteger cond = (opcode >> 3) & 3;
             uint16_t target = CPUFetch16(self, bus);
-            if (CondPass(self, cond)) { CPUPush16(self, bus, _pc); _pc = target; cycleCount = 6; } else { cycleCount = 3; }
+            if (CondPass(self, cond)) { [self tickM:bus]; CPUPush16(self, bus, _pc); _pc = target; cycleCount = 6; } else { cycleCount = 3; }
         } break;
 
         // RET 関連
         case 0xC9: { _pc = CPUPop16(self, bus); cycleCount = 4; } break;
         case 0xC0: case 0xC8: case 0xD0: case 0xD8: {
             NSUInteger cond = (opcode >> 3) & 3;
-            if (CondPass(self, cond)) { _pc = CPUPop16(self, bus); cycleCount = 5; } else { cycleCount = 2; }
+            if (CondPass(self, cond)) { [self tickM:bus]; _pc = CPUPop16(self, bus); cycleCount = 5; } else { cycleCount = 2; }
         } break;
         case 0xD9: { _pc = CPUPop16(self, bus); _ime = YES; cycleCount = 4; } break;
 
         // RST
         case 0xC7: case 0xCF: case 0xD7: case 0xDF: case 0xE7: case 0xEF: case 0xF7: case 0xFF: {
             uint16_t vector = (uint16_t)(0x0000 + ((uint16_t)(opcode - 0xC7) & 0x38));
+            [self tickM:bus]; // 内部 M(実機: M1=internal)
             CPUPush16(self, bus, _pc);
             _pc = vector;
             cycleCount = 4;
@@ -569,15 +596,30 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0xFB: _imeDelayed = YES; cycleCount = 1; break;
 
         // LD (a16),SP / LD A,(a16)
-        case 0x08: { uint16_t addr = CPUFetch16(self, bus); [bus cpuWrite:(uint8_t)(_sp & 0xFF) address:addr]; [bus cpuWrite:(uint8_t)(_sp >> 8) address:(uint16_t)(addr + 1)]; cycleCount = 5; } break;
+        case 0x08: { uint16_t addr = CPUFetch16(self, bus); [bus cpuWrite:(uint8_t)(_sp & 0xFF) address:addr]; [self tickM:bus]; [bus cpuWrite:(uint8_t)(_sp >> 8) address:(uint16_t)(addr + 1)]; [self tickM:bus]; cycleCount = 5; } break;
 
         default:
             cycleCount = 1; // 未知オペコードは NOP として扱う(MBLogPort 記録は bus 側で)
             break;
     }
 
-    [self tickBusTimes:bus count:cycleCount];
+    [self finishTicks:cycleCount bus:bus];
     return cycleCount;
+}
+
+// _ticksDone を数えながら 1 M-cycle 吐き出す(直近命令の M-cycle 進行トラッキング)
+- (void)tickM:(id<MBCPUBus>)bus {
+    _ticksDone += 1;
+    [bus cpuTickCycle];
+}
+
+// 残りの M-cycle(内部遅延などバス操作を持たない分)を吐き出して打ち切る
+- (void)finishTicks:(NSUInteger)total bus:(id<MBCPUBus>)bus {
+    NSUInteger done = _ticksDone;
+    if (done < total) {
+        [self tickBusTimes:bus count:(total - done)];
+        done = total;
+    }
 }
 
 - (void)tickBusTimes:(id<MBCPUBus>)bus count:(NSUInteger)count {
