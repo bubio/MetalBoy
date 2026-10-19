@@ -21,11 +21,12 @@ NS_ASSUME_NONNULL_BEGIN
 @interface MBMemoryMap ()
 @property (nonatomic, strong) NSMutableData *wram;
 @property (nonatomic, strong) NSMutableData *hram;
-@property (nonatomic) uint16_t divCounter;     // $FF04 内部カウンタ(上位 8bit が DIV)
+@property (nonatomic) uint16_t divCounter;     // $FF04 内部カウンタ(dot 単位 +4/M。上位 8bit が DIV)
 @property (nonatomic) uint8_t tima;
 @property (nonatomic) uint8_t tma;
 @property (nonatomic) uint8_t tac;
-@property (nonatomic) int32_t timerCounter;
+@property (nonatomic) BOOL timaReloadPending;  // TIMA$FF オーバーフロー:M 中(立下り tick〜リロード tick)
+@property (nonatomic) BOOL timaReloadGuard;    // リロード M 中: TIMA 書込み廃棄・TMA 書込みは TIMA へ即反映
 @property (nonatomic) uint8_t serialData;      // $FF01 SB
 @property (nonatomic) BOOL serialTransferStart; // $FF02 bit7
 @property (nonatomic) int32_t serialTransferCounter;
@@ -57,16 +58,29 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Timer
 
-- (uint32_t)timaPeriodDots {
-    switch (_tac & 0x03) {
-        case 0: return 1024; // 4096 Hz
-        case 1: return 16;   // 262144 Hz
-        case 2: return 64;   // 65536 Hz
-        default: return 256; // 16384 Hz
+// TAC&3 → dot 単位内部カウンタの立下り検出ビット
+// (4096Hz=1024dot→bit9 / 262kHz=16dot→bit3 / 65536Hz=64dot→bit5 / 16384Hz=256dot→bit7)
+//
+- (uint16_t)tacDotsMask {
+    static const uint16_t masks[4] = {0x0200, 0x0008, 0x0020, 0x0080};
+    return masks[_tac & 0x03];
+}
+
+// クロックライン = TAC enable かつ 選択ビットが 1。1→0 遷移が TIMA tick
+- (BOOL)timerClockHigh {
+    return ((_tac & 0x04) != 0) && ((_divCounter & [self tacDotsMask]) != 0);
+}
+
+// 立下りエッジでの TIMA 更新。$FF で 0 停止(1 M-cycle)→ 翌 tick で TMA+IF
+- (void)timerFallingEdge {
+    if (_tima == 0xFF) {
+        _tima = 0;
+        _timaReloadPending = YES;
+    } else {
+        _tima++;
     }
 }
 
-- (uint32_t)divPeriodDots { return 256; }
 
 #pragma mark - read/write
 
@@ -208,11 +222,42 @@ NS_ASSUME_NONNULL_BEGIN
             }
             break;
         }
-        case 0xFF04: _divCounter = 0; break; // 書き込むと DIV はリセット
-        case 0xFF05: _tima = value; break;
-        case 0xFF06: _tma = value; break;
+        case 0xFF04: {
+            // 書込みは内部カウンタの 0 化。選択ビットが立っていた場合は
+            // 1→0 遷移(=立下りエッジ)が書込み時点で発生する(Mooneye *_div_trigger)。
+            // オーバーフロー待ちがある場合は DIV リセットでキャンセルされる。
+            if ([self timerClockHigh]) [self timerFallingEdge];
+            _divCounter = 0;
+            _timaReloadPending = NO;
+            break;
+        }
+        case 0xFF05:
+            // オーバーフロー M 中: 書込みがオーバーフローをキャンセル(リロードも IF もなし)。
+            // リロード M 中: TIMA 書込みは廃棄、TMA 書込みはリロードドットへの到着とみなし TIMA へ反映。
+            if (_timaReloadPending) {
+                _tima = value;
+                _timaReloadPending = NO;
+            } else if (!_timaReloadGuard) {
+                _tima = value;
+            }
+            break;
+        case 0xFF06: {
+            _tma = value;
+            if (_timaReloadPending) {
+                // リロードが次 tick で新しい TMA を拾う
+                _timaReloadPending = YES;
+            } else if (_timaReloadGuard) {
+                // リロード M 中の TMA 書込みは TIMA へも反映される
+                _tima = value;
+            }
+            break;
+        }
         case 0xFF07: {
+            // TAC 書込みでも clock line(enabled && 選択ビット)の 1→0 で tick
+            // (disable 時や mask 変更で旧ラインが 1 のまま落とされる場合を含む)
+            BOOL oldHigh = [self timerClockHigh];
             _tac = (uint8_t)(value & 0x07);
+            if (oldHigh && ![self timerClockHigh]) [self timerFallingEdge];
             break;
         }
         case 0xFF40: if (ppu) ppu.lcdc = value; break;
@@ -284,24 +329,20 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - tick
 
 - (void)tickCycle {
-    // 1 M-cycle = 4 T-cycle(dots)。timer も同様
-    _divCounter += 4;
-    if ((_divCounter & 0xFF) < 4) {
-        // $FF04 の DIV 値は上位 8bit → ここでの 0xFF 相当を超えた++
-        // 簡約: DIV 値は内部長カウンタ上位8bit → 256 T-cycle 毎に +1
+    // 1 M-cycle = 4 T-cycle(dots)。
+    // 実機タイマ: 内部 dot カウンタの +4 毎に TAC 選択ビットの立下りを見る。
+    // TIMA リロード待ちを先に消化(reload 前の廃棄ガードも 1 tick で解く)。
+    _timaReloadGuard = NO;
+    if (_timaReloadPending) {
+        _timaReloadPending = NO;
+        _tima = _tma;
+        _ifRegister |= 0x04;
+        _timaReloadGuard = YES; // リロード M 中の TIMA 書込みだけ廃棄される
     }
-    if (_tac & 0x04) {
-        _timerCounter += 4;
-        uint32_t period = [self timaPeriodDots];
-        while (_timerCounter >= (int32_t)period) {
-            _timerCounter -= period;
-            if (_tima == 0xFF) {
-                _tima = _tma;
-                _ifRegister |= 0x04;
-            } else {
-                _tima++;
-            }
-        }
+    uint16_t prev = _divCounter;
+    _divCounter = (uint16_t)(_divCounter + 4);
+    if ((_tac & 0x04) && ((prev & [self tacDotsMask]) != 0) && ((_divCounter & [self tacDotsMask]) == 0)) {
+        [self timerFallingEdge];
     }
     if (_serialTransferStart) {
         // 8 bits at 512 bit/s → 簡約: 1 M-cycle で完了

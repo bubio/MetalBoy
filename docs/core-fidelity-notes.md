@@ -285,6 +285,62 @@ jp\_timing・jp\_cc\_timing(命令 timing クラス 10 本)。
 引き続き `blargg cpu_instrs 11/11`・単体テスト 69/69・Tetris 音声統計(1200F/2400F)を
 変更前とビット単位で同一を確認(リグレッションなし)。
 
+### 修正 5: EI 遅延 IME の適用位置精密化(2026-10-19 第5弾)
+
+実機: **IME は EI の翌命令の「完了後」に立つ**。旧実装は翌命令の「開始時」に
+適用し同一ステップでディスパッチ判定をしていたため、EI 直後の境界で割込みが
+1 命令早く発火(B=$00 のまま $0058 に入る)した。`ei_timing` の PC トレース
+(/tmp/mbtrace: MBCPU サブクラス + KVC で全ステップ記録)で特定:
+
+- 修正: `stepWithBus` 冒頭で EI 遅延フラグを `_imeApplyAfterInstruction` に積み替え、
+  適用を `finishTicks`(全命令パスの必経点、CB/LD/ALU 即値群の早期 return 含む)で行う。
+  早期 return 直接テールに置くと ALU 系命令が途中でスキップして IME が永遠に立たなく
+  なる(halt\_ime1\_timing が halt のまま固まる)ため必経点に置くのが要。
+- 連鎖 EI(ei\_sequence)は「EI#1 で待機→EI#2 完了後に IME 立つ→EI#3 直前の境界で
+  ディスパッチ(push PC=$01A2)」で解決する。
+- ei\_timing・ei\_sequence・reti\_intr\_timing が PASS。reti の即時 IME(RETI は
+  遅延なし)は既存実装どおり。
+
+### 修正 6: 割込みディスパッチ最中の IE 書換(ie_push)(2026-10-19 第5弾)
+
+ディスパッチを「M1,M2 内部 → 上位 byte push(SP-1、$FFFF=IE への衝突あり) →
+**上位 push 直後に (IF & IE) 再評価** → 下位 byte push(SP-2) → ベクタジャンプ+IF
+クリア+内部 M」に改修:
+
+- 再評価が 0: **ディスパッチ中止**(下位 push なし・IF クリアなし・PC=$0000・
+  IME=0 のまま)。ie\_push round1(上位 push の IE 書換 $02 で TIMER ビット消失)実現。
+- 再評価が非 0: **再優先決定**(round4: VBlank が消されて STAT が選ばれる)。
+- 下位 push 中の IE 書換は再評価後のため取り消されない(round3)。
+- PC push の分割化に伴い `CPUPush16` は通常命令用のまま、ディスパッチは手分割。
+
+### 修正 7: タイマの立下りエッジモデル全面書き直し(2026-10-19 第5弾)
+
+旧実装は DIV 内部カウンタと独立した period カウンタ(timerCounter)で TIMA を刻んで
+おり、DIV/TIMA 位相が独立していた。実機は:
+
+- **16bit 内部 dot カウンタ(+4/M)が共有**。DIV=$FF04 読み = カウンタ >> 8。
+- TIMA は **TAC 選択ビット {4096Hz:bit9 / 262k:bit3 / 65536:bit5 / 16384:bit7} の
+  立下りエッジ(1→0)** で +1(DOT 粒度: 最初の立下りは 2^(b+1) dot 後 = 各周期的と一致)。
+- TIMA=$FF でエッジ → **$00 停止 1 M-cycle → リロード(TMA)+IF bit2**。
+- **オーバーフロー M 中の TIMA 書込み = オーバーフロー自体をキャンセル**
+  (値が有効・リロードも IF もなし)。**リロード M 中の TIMA 書込み = 廃棄**、
+  **リロード M 中の TMA 書込み = 新値が TIMA へ即反映**。
+- **DIV 書込み = カウンタ 0 化 + 選択ビット立上り時は即エッジ**(tim\*\_div\_trigger)。
+- TAC 書込みでも clock line(enabled && 選択ビット)の 1→0 でエッジ。
+
+これで timer クラスタ **12 本(tim00/01/10/11・4 件の div\_trigger・
+tima\_reload・tima\_write\_reloading・tma\_write\_reloading・div\_write・rapid\_toggle)が
+PASS**(旧 tim01 のみから 12 に)。
+`rapid_di_ei` は引き続き未解決。
+
+### Mooneye 結果(2026-10-19 第5弾時点)
+
+**52/75 PASS**(38/75 → 52/75)。追加 PASS:
+ei\_timing・ei\_sequence・reti\_intr\_timing・ie\_push・div\_write・tima\_reload・
+tima\_write\_reloading・tma\_write\_reloading・tim00・tim10・tim11・
+tim00\_div\_trigger・tim01\_div\_trigger・tim10\_div\_trigger・tim11\_div\_trigger・
+rapid\_toggle。
+
 ### 観測メモ: Tetris の約 40 秒以降の無音
 
 変更前後で同一のため DMA 修正の影響ではない。1200F(20秒)では BGM nonzero 88.8%。

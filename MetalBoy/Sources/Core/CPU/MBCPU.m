@@ -65,6 +65,7 @@ static inline uint16_t Add16NoZero(uint16_t a, uint16_t b, uint8_t *outFlags) {
 @property (nonatomic) uint16_t pc;
 @property (nonatomic) BOOL ime;
 @property (nonatomic) BOOL imeDelayed;
+@property (nonatomic) BOOL imeApplyAfterInstruction; // EI 遅延: 翌命令完了後に適用する待機分
 @property (nonatomic) BOOL halted;
 @property (nonatomic) NSUInteger ticksDone; // 直近命令で既に吐き出した M-cycle 数
 @end
@@ -218,7 +219,10 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
 #pragma mark - step
 
 - (NSUInteger)stepWithBus:(id<MBCPUBus>)bus {
-    if (_imeDelayed) _ime = YES;
+    // EI 遅延: 前命令(EI)で待機したフラグは「この命令の完了後」に IME へ反映する。
+    // 実態は finishTicks(命令末尾)で適用するのでここで積み替える。
+    // ここで消費しておかないと case 0xFB 自身が立てるフラグと混ざる。
+    _imeApplyAfterInstruction = _imeDelayed;
     _imeDelayed = NO;
     _ticksDone = 0;
 
@@ -229,13 +233,37 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         for (NSInteger i = 0; i < 5; i++) {
             if (serviceable & kIFBits[i]) {
                 _ime = NO;
+                _halted = NO;
                 uint16_t returnPC = _pc;
                 // 実機: 2 internal + PC push(W,W=push 内で tick)+ 1 internal の 5 M-cycle
                 [self tickBusTimes:bus count:2];
-                CPUPush16(self, bus, returnPC);
-                _pc = kIFVectors[i];
-                [bus setIfRegister:(uint8_t)(ifReg & ~kIFBits[i])];
-                _halted = NO;
+                // 上位 byte push(SP-1)。ここが $FFFF=IE の場合、ディスパッチ最中の
+                // IE 書換が起きる(Mooneye ie_push.s の観測)
+                _sp = (uint16_t)(_sp - 1);
+                [bus cpuWrite:(uint8_t)(returnPC >> 8) address:_sp];
+                [self tickM:bus];
+                // 実機: 上位 push 直後に (IF & IE) を再評価し、64 再優先決定する。
+                // 0 ならディスパッチ取り消し: 下位 push なし・IF クリアなし・
+                // PC=$0000(ie_push round1 の観測)、IME は 0 のまま(round2)。
+                uint8_t rePending = [bus ifRegister] & ([bus ieRegister] & 0x1F);
+                if (rePending == 0) {
+                    _pc = 0x0000;
+                    _imeApplyAfterInstruction = NO;
+                    [self tickBusTimes:bus count:1];
+                    return 5;
+                }
+                NSInteger j = i;
+                for (NSInteger k = 0; k < 5; k++) {
+                    if (rePending & kIFBits[k]) { j = k; break; }
+                }
+                // 下位 byte push(SP-2)。round3 の観測: ここでの IE 書換は
+                // 再評価済みのためディスパッチは取り消されない
+                _sp = (uint16_t)(_sp - 1);
+                [bus cpuWrite:(uint8_t)(returnPC & 0xFF) address:_sp];
+                [self tickM:bus];
+                _pc = kIFVectors[j];
+                [bus setIfRegister:(uint8_t)([bus ifRegister] & ~kIFBits[j])];
+                _imeApplyAfterInstruction = NO;
                 [self tickBusTimes:bus count:1];
                 return 5;
             }
@@ -613,12 +641,17 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
     [bus cpuTickCycle];
 }
 
-// 残りの M-cycle(内部遅延などバス操作を持たない分)を吐き出して打ち切る
+// 残りの M-cycle(内部遅延などバス操作を持たない分)を吐き出して打ち切る。
+// すべての命令パス(CB/LD/ALU 即値群の早期 return 経由含む)がここを必ず 1 回
+// 通るので、EI 遅延の IME 適用もここで行う。
 - (void)finishTicks:(NSUInteger)total bus:(id<MBCPUBus>)bus {
     NSUInteger done = _ticksDone;
     if (done < total) {
         [self tickBusTimes:bus count:(total - done)];
-        done = total;
+    }
+    if (_imeApplyAfterInstruction) {
+        _ime = YES;
+        _imeApplyAfterInstruction = NO;
     }
 }
 
