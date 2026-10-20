@@ -34,9 +34,8 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     /// LCD ON 直後の「死相」残 dots(実機 72 dots: LCD OFF→ON 遷移で setting。
     /// dead 中 = LY=0 固定・モード読出し 0・OAM/VRAM アクセス可(lcdon_timing-GS)
     uint32_t _lcdBootDots;
-    /// line0(死相後)の mode0(HBlank) 長。通常ラインは 204(MBPPULineDots-80-172)、
-    /// 死相 84 の line0 は LY 増分実測(≈452)に合わせ 196 に短縮
-    uint32_t _bootHBlankDots;
+    /// 直前の HBlank 中に LY 増分(終端 4 dot 前)を行ったか。VBlank 遷移判定用
+    BOOL _hblankIncremented;
     uint8_t _stat;
     MBPPUMode _mode;
     uint32_t _dotsInMode;
@@ -44,6 +43,14 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     BOOL _frameSignaled;
     BOOL _statIrqLine;       // 内部 STAT 割込みライン(エッジ判定用)
     BOOL _coincidenceLatch;  // LCD OFF 中に保持される LY==LYC 最終比較結果
+    /// LY 増分直後〜mode2 開始(HBlank 終端)までの 4 dot: STAT bit2 は強制 0
+    /// (実機。lcdon_timing-GS STAT_LYC0/LYC1 pass2 s3 がともに 0x80 で確定)
+    BOOL _coincBlanked;
+    /// OAM/VRAM 読み出し禁止窓の anchor: 直近の LY 増分 dot からの dots。
+    /// 窓: OAM = 通常 [0,256)/line0 [80,252)・VRAM = [80,252)
+    uint32_t _dotsSinceInc;
+    /// line0(死相)窓が有効(lcdon_timing-GS OAM: line0 の窓は mode3 開始から)
+    BOOL _bootWindow;
 }
 @property (nonatomic, readwrite, strong) NSMutableData *framebuffer;
 @property (nonatomic, readwrite) NSUInteger completedFrameCount;
@@ -68,13 +75,17 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _obp1 = 0xFF;
         _ly = 0;
         _stat = 0x00;
-        _mode = MBPPUModeOAMScan;
+        _mode = MBPPUModeHBlank; // 電源投入死相中のモード読出し 0 と一致
         _dotsInMode = 0;
         _mode3Length = MBPPUMode3BaseLength;
         _completedFrameCount = 0;
         _frameSignaled = NO;
-        _lcdBootDots = 0;
-        _bootHBlankDots = 0;
+        // 電源投入直後 = 実機同様 LCD ON 死相から開始(off→on 遷移と同一状態)
+        _lcdBootDots = 80;
+        _dotsSinceInc = 0;
+        _bootWindow = YES;
+        _hblankIncremented = NO;
+        _coincBlanked = NO;
         _statIrqLine = NO;
         _coincidenceLatch = NO;
     }
@@ -85,6 +96,18 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
 - (uint8_t)readVRAM:(uint16_t)address {
     address &= 0x1FFF;
+    // VRAM 読み出し禁止窓(dsi = LY 増分 anchor からの dots): [80, 252)。
+    // line0(死相 mode3 [80,252))と通常 line(mode3 を −4 dot ロール [inc+80, inc+252))
+    // が同一則で書ける(実機。lcdon_timing-GS VRAM 群全サンプル実測)
+    // VRAM 読み出し禁止窓(dsi): [anchor+80, anchor+256) — mode3 開始の 4 dot 前
+    // (−4 ロールは START のみ)から mode0 開始 dot まで。line0(死相)/通常同一則。
+    if (self.lcdc & 0x80 && _mode != MBPPUModeVBlank) {
+        uint32_t s = _dotsSinceInc;
+        // line0(死相): [anchor+80, anchor+252) / 通常: [anchor+80, anchor+256)
+        // (mode3 の可視開始 dot から −4 ロールは START のみ、終端は mode0 開始)
+        BOOL denied = _bootWindow ? (s >= 80 && s < 252) : (s >= 80 && s < 256);
+        if (denied) return 0xFF;
+    }
     return ((const uint8_t *)_vram.bytes)[address];
 }
 
@@ -95,8 +118,18 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
 - (uint8_t)readOAM:(uint16_t)address {
     address &= 0xFF;
-    // mode 3 中の OAM 読み出しは不可 = 0xFF を返す(実機。Mooneye intr_2_oam_ok_timing)
-    if (self.lcdc & 0x80 && _mode == MBPPUModeDraw) return 0xFF;
+    // OAM 読み出し禁止窓(dsi = 直近の LY 増分 anchor からの dots):
+    //   通常 line = [0, 256)  /  line0(LCD ON 直後の死相) = [80, 252)
+    // (実機。lcdon_timing-GS OAM 群全サンプル: LY 増分 dot から早期ロック開始、
+    //  mode0 開始(HBlank)で解放、line0 は死相 mode3 開始から)。intr_2_oam_ok_timing
+    // (mode0 開始で解放)とも整合。
+    if (self.lcdc & 0x80 && _mode != MBPPUModeVBlank) {
+        uint32_t s = _dotsSinceInc;
+        // line0(死相): 窓 = 可視 mode3 そのまま [anchor+80, anchor+252)。
+        // 通常 line: OAM = [anchor, anchor+256)(mode2 の 4 dot 前〜mode0 開始)
+        BOOL denied = _bootWindow ? (s >= 80 && s < 252) : (s < 256);
+        if (denied) return 0xFF;
+    }
     return ((const uint8_t *)_oam.bytes)[address];
 }
 
@@ -108,9 +141,15 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 }
 
 - (void)setLcdc:(uint8_t)value {
-    // LCD OFF→ON 遷移で「死相」を設定(実機 72 dots: LY=0・モード読出し 0・
-    // OAM/VRAM ともアクセス可 → lcdon_timing-GS 実測からの定数)
-    if ((value & 0x80) && !(_lcdc & 0x80)) _lcdBootDots = 84;
+    // LCD OFF→ON 遷移で「死相」を設定(実機 80 dots = mode2 と同長: LY=0 固定・
+    // モード読出し 0・OAM/VRAM ともアクセス可 → lcdon_timing-GS 実測からの定数)。
+    // line0 = 死相 80 + mode3 172 + mode0 204 = 通常 456-dot ラインと同長。
+    // dsi 窓 anchor(LY 増分相当)を LCD ON dot に置く(line0 用)
+    if ((value & 0x80) && !(_lcdc & 0x80)) {
+        _lcdBootDots = 80;
+        _dotsSinceInc = 0;
+        _bootWindow = YES;
+    }
     _lcdc = value;
 }
 
@@ -123,7 +162,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     uint8_t result = (uint8_t)(0x80 | (_stat & 0x78)); // bit7 は常時 1(実機仕様)
     if (self.lcdc & 0x80) {
         result |= (uint8_t)(_mode & 0x03);
-        if (_ly == self.lyc) result |= 0x04;
+        if (!_coincBlanked && _ly == self.lyc) result |= 0x04;
     } else {
         // LCD OFF: モード読出し 0・比較クロック停止(latch 保持)
         if (_coincidenceLatch) result |= 0x04;
@@ -141,6 +180,9 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         // LCD OFF: LY=0・モード 0 に固定。直前のフレーム完了は 1 度だけ通知
         _mode = MBPPUModeHBlank;
         _ly = 0;
+        _coincBlanked = NO;
+        _dotsSinceInc = 0;
+        _bootWindow = NO;
         _dotsInMode = 0;
         if (_frameSignaled) {
             _frameSignaled = NO;
@@ -152,25 +194,25 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     BOOL frameCompleted = NO;
     for (uint32_t i = 0; i < dots; i++) {
         // LCD ON 直後の死相: LY=0 固定・モード読出し 0(HBlank 相当 = OAM/VRAM アクセス可)。
-        // 終端で mode3(Draw)へ遷移し、line0 = 死相 72 + mode3 172 + mode0 204 = 448 dots。
+        // 長さ = 80 = mode2 と同長。終端で mode3(Draw)へ遷移し、line0 = 死相 80 +
+        // mode3 172 + mode0 204 = 通常 456-dot ラインと同構造(mode2 が死相に置換)。
         if (_lcdBootDots > 0) {
             _lcdBootDots--;
             if (_lcdBootDots == 0) {
-                // 死相終端: line0 は mode2 相位なきまま mode3 開始
-                // (line0 = 死相 84 + mode3 172 + mode0 196 = 452 dots:
-                //  pass1=00/pass2=01/pass3=01 の 4 dot 窓から実機 inc1 ≈ 452)
+                // 死相終端: mode3 開始(_bootHBlankDots 廃止: line0 の mode0 も 204)
                 _mode = MBPPUModeDraw;
                 _dotsInMode = 0;
-                _bootHBlankDots = 196;
             } else {
                 _mode = MBPPUModeHBlank;
                 _ly = 0;
                 _dotsInMode = 0;
             }
+            _dotsSinceInc++; // dsi anchor = LCD ON dot(line0 窓用)
             [self fireSTATIfRequest:ifRequest];
             continue;
         }
         _dotsInMode++;
+        _dotsSinceInc++;
         switch (_mode) {
             case MBPPUModeOAMScan:
                 if (_dotsInMode >= MBPPUMode2Length) {
@@ -186,23 +228,36 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
                 if (_dotsInMode >= _mode3Length) {
                     _dotsInMode = 0;
                     _mode = MBPPUModeHBlank;
+                    _hblankIncremented = NO;
                     [self renderCurrentScanline];
                 }
                 break;
             case MBPPUModeHBlank: {
-                uint32_t threshold = _bootHBlankDots > 0
-                    ? _bootHBlankDots
-                    : MBPPULineDots - 80 - _mode3Length;
+                uint32_t threshold = MBPPULineDots - 80 - _mode3Length;
+                // LY 増分は HBlank 終端の 4 dot 前(実機。lcdon_timing-GS LY pass1-3 の
+                // 4-dot 窓 + hblank_ly_scx_timing-GS の 51/50/49 M データから確定:
+                // LY 増分 = 次 line mode2 開始の 4 dot 前 = mode0 開始 + mode0長 - 4)。
+                // VBlank 遷移(143→144)は終端同時(現行 vblank_stat_intr-GS PASS 維持)。
+                if (_dotsInMode == threshold - 4 && _ly <= 142) {
+                    // 増分直後 4 dot: STAT bit2 強制 0(実機)
+                    _coincBlanked = YES;
+                    _ly++;
+                    _hblankIncremented = YES;
+                    // dsi anchor 更新: OAM/VRAM 禁止窓はこの dot から張り直し
+                    _dotsSinceInc = 0;
+                    _bootWindow = NO;
+                }
                 if (_dotsInMode >= threshold) {
                     _dotsInMode = 0;
-                    if (_bootHBlankDots > 0) _bootHBlankDots = 0;
-                    if (_ly == 143) {
+                    _coincBlanked = NO;
+                    if (_hblankIncremented) {
+                        _mode = MBPPUModeOAMScan;
+                        _hblankIncremented = NO;
+                    } else {
+                        // LY 増分なし = line 143 の HBlank → VBlank 開始
                         _ly = 144;
                         _mode = MBPPUModeVBlank;
                         if (ifRequest) *ifRequest |= 0x01; // VBlank 割り込み要求
-                    } else {
-                        _ly++;
-                        _mode = MBPPUModeOAMScan;
                     }
                 }
                 break;
@@ -210,6 +265,9 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
             case MBPPUModeVBlank:
                 if (_dotsInMode >= 456) {
                     _dotsInMode = 0;
+                    // VBlank 各 line 境界でも dsi anchor 更新(VBlank 中の読み出し窓)
+                    _dotsSinceInc = 0;
+                    _bootWindow = NO;
                     if (_ly == 153) {
                         _ly = 0;
                         _mode = MBPPUModeOAMScan;
@@ -234,7 +292,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     // LCD OFF 中は比較クロック停止。モード読出し 0・LY==LYC は latch で保持(stat_lyc_onoff)。
     BOOL line;
     if (self.lcdc & 0x80) {
-        BOOL coincidence = (_ly == self.lyc);
+        BOOL coincidence = (!_coincBlanked && _ly == self.lyc);
         _coincidenceLatch = coincidence; // OFF 遷移時の保持値を常時更新
         // bit5(OAM mode2): LY=144 の VBlank 開始でも同一 dot で発火する(実機。
         // Mooneye vblank_stat_intr-GS: vblank IF と stat m2 IF が同時)

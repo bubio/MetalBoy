@@ -56,7 +56,8 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertFalse(ifRequest & 0x01, "LCD OFF では VBlank 割り込みなし");
 }
 
-// mode 3(Draw)中の OAM ロック: 読み 0xFF・書込み捨て(実機。Mooneye intr_2_oam_ok_timing)
+// OAM ロック: mode 2/3 中の読み 0xFF・mode3 中の CPU 書込み捨て(実機。
+// lcdon_timing-GS OAM グループ: mode2 中も FF / intr_2_oam_ok_timing: mode0 開始で解放)
 // モード観測は公開 API statValue($FF41 読み値)の bit1-0
 - (void)testOAMLockedDuringMode3 {    MBPPU *ppu = [[MBPPU alloc] init];
     ppu.lcdc = 0x91; // LCD on
@@ -74,11 +75,11 @@ NS_ASSUME_NONNULL_BEGIN
                     XCTAssertEqual([ppu readOAM:4], 0xCD, "mode0 中は OAM 書込み有効");
                 }
                 break;
-            case 0x02: // OAMScan: アクセス可
+            case 0x02: // OAMScan: 読みロック(実機。lcdon_timing-GS OAM グループ)
                 if (!checkedMode2) {
                     checkedMode2 = YES;
-                    [ppu writeOAM:0xAB address:2];
-                    XCTAssertEqual([ppu readOAM:2], 0xAB, "mode2 中は OAM 読書き可");
+                    XCTAssertEqual([ppu readOAM:2], 0xFF, "mode2 中の OAM 読みは 0xFF");
+                    [ppu writeOAM:0xAB address:2]; // 書込みは現行仕様では保持(将来 mode2 破棄へ)
                 }
                 break;
             case 0x03: // Draw: ロック
@@ -96,7 +97,8 @@ NS_ASSUME_NONNULL_BEGIN
     }
     XCTAssertTrue(checkedMode2 && checkedMode3 && checkedMode0, "3 モードすべて観測");
 
-    // mode0 中の検査は次フレームの mode0 で値を確定確認(HBlank 観測は 1 行 1 回の可能性があるため)
+    // 値の確定確認は mode0(HBlank)中に(HBlank を待つ)
+    while ((ppu.statValue & 0x03) != 0x00) [ppu tickDots:1 ifRequest:&ifRequest];
     XCTAssertEqual([ppu readOAM:2], 0xAB, "mode2 中に書んだ値が保持されている");
     XCTAssertEqual([ppu readOAM:3], 0x00, "mode3 中に書んだ値は破棄されている");
 }
@@ -109,12 +111,13 @@ NS_ASSUME_NONNULL_BEGIN
     [ppu writeSTAT:0x20]; // bit5(OAM mode2 割込み)のみ
 
     uint8_t ifRequest = 0;
-    // LY 143 に到達するまで進める
+    // LY 143 に到達するまで進める(LY 増分は HBlank 終端の 4 dot 前 →
+    // LY=143 の初観測は line 143 開始の 4 dot 手前)
     while (ppu.ly < 143) {
         [ppu tickDots:1 ifRequest:&ifRequest];
     }
-    // 残り 455 dots + 遷移 dot。遷移 dot 直前の状態に整えてから 1 dot 進める
-    for (NSUInteger i = 0; i < 455; i++) [ppu tickDots:1 ifRequest:&ifRequest];
+    // 残り HBlank 4 dot + line 143 の 456 dots。遷移 dot 直前の状態に整えてから 1 dot 進める
+    for (NSUInteger i = 0; i < 459; i++) [ppu tickDots:1 ifRequest:&ifRequest];
     ifRequest = 0;
     [ppu tickDots:1 ifRequest:&ifRequest];
 

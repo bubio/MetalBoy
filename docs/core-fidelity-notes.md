@@ -514,6 +514,47 @@ mbboot3(ラップ補正 TRUE dots 計測)による断:
   (修正9の効果)、FF40/47/50・IE も PASS。
 
 
+### 修正 15:lcdon_timing-GS 完全 PASS = LY 増分・LYC 比較・OAM/VRAM 禁止窓の全面再較正(2026-10-20)
+
+lcdon_timing-GS を反復較正(mbLcdonFail)し、以下を「実測解」として MBPPU に実装した。
+
+**(A) LY 増分を HBlank 終端の 4 dot 前に移動**。以前は HBlank 終端(= 次 line の
+mode2 開始と同 dot)で LY++ していた。実測: LY pass2 s3 の期待 01(増分済み)と
+STAT\_LYC1 pass2 s3 の期待 80(LYC=1 なのに coincidence 無し)が同一 dot で共存するのは、
+増分が窓 [452,456) で既に効いているから。hblank\_ly\_scx\_timing-GS の 51/50/49 M データ
+(LY 増分 = mode0 開始 + (mode0長 − 4))とも完全整合。実装: HBlank case 内
+`_dotsInMode == threshold - 4 && _ly <= 142` で LY++(VBlank 遷移 143→144 は従来通り
+終端 `_dotsInMode >= threshold` で同時)。**副産物: hblank\_ly\_scx\_timing-GS が PASS**。
+
+**(B) LY 増分直後 4 dot は STAT bit2(coincidence)強制 0**。STAT\_LYC0/LYC1 の
+pass2 s3 がともに 0x80(リード値同 80 ID ど副)→ 自然比較(C0 依存で解析)ではどちらか一方しか
+説明できず双方 0 が唯一の整合解。`_coincBlanked`(増分 dot で立つ、threshold で消える)。
+
+**(C) OAM/VRAM 読み出しは mode FSM でなく「窓」で判定**(lcdon_timing-GS OAM/VRAM 群
+120 観測値すべてと整合)。ddsi = 窓 anchor(LY 増分 dot、line0 は LCD ON dot)からの dots:
+
+```
+OAM  禁止: line0(死相) = [anchor+80, anchor+252) / 通常 = [anchor, anchor+256)
+VRAM 禁止: [anchor+80, anchor+252)(line0) / [anchor+80, anchor+256)(通常)
+   端末解放 = mode0(HBlank)開始 dot、開始側は可視 mode3/mode2 の 4 dot 前
+   (mode2 が無い line0 は mode3 そのまま)。VBlank(mode1)中は無条件に読可。
+```
+
+検証例: line1 で VRAM は dsi 76-79(=528-531)が 00 / dsi 80-83(=532-535)が FF
+(可視 mode3 536 の 4 dot 前からロック)、OAM は dsi 252-255(=704-707)が FF /
+dsi 256+(=708+)が 00 → 両窓の非対称が同一 dot の OAM/VRAM 読みで実測される。
+mode2 中の OAM 読み 0xFF もこの窓則に含まれる(以前の mode3 のみ実装を置換)。
+
+**(D) 電源投入も死相から開始**(init: `_lcdBootDots = 80`, `_bootWindow = YES`,
+`_mode = HBlank`)。実機の電源投入 LCDC は $91(LCD on)のため off→on 遷移待ちではなく
+init 時点で死相状態。**副産物: boot\_regs-dmgABC が PASS**(死相 LY=0 固定が BIOS
+ランタイムの初期待値に一致)。ただし **boot\_regs-dmg0 は FAIL に変動**(要確認)。
+
+**CdNN 結果(unused Mooneye 75 本、600F): 59 PASS / 15 FAIL / 1 判定不能**(修正前 57/17)。
+lcdon\_timing-GS・hblank\_ly\_scx\_timing-GS・boot\_regs-dmgABC の +3。
+単体テスト testLCDOnBootPhase・testOAMLockedDuringMode3(mode2 で読み 0xFF 期待に改訂)・
+testSTATMode2InterruptAtVBlankStart(LY=143 初観測が 4 dot 前になったため 459+1 dot に改訂)。
+
 ### 観測メモ: Tetris の約 40 秒以降の無音
 
 変更前後で同一のため DMA 修正の影響ではない。1200F(20秒)では BGM nonzero 88.8%。
@@ -529,14 +570,11 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
   ハードオラクル(実機の電源投入時ライン位相)が得られない限り一旦 close
   (boot\_regs-dmgABC/mgb/sgb/sgb2 は複数モデルの BIOS 差分のため要ランナー対応)。
 - **unused\_hwio-GS**: **PASS(修正 11)**。FF23/FF26/FF18/FF10 の読み値を修正。
-- **PPU GS クラスタ**: vblank\_stat\_intr-GS **PASS(修正 12)**。残り 3 本:
-  - hblank\_ly\_scx\_timing-GS: mode3 長の SCX&7 伸縮は修正 13 で実装済み。
-    残置は READ cycle と LY 増分の M 境界位相(上記解析参照)。CPU/PPU 位相契約の見直しが必要。
-  - lcdon\_timing-GS: **死相 boot phase 実装済み(修正 14)**。LY グループ pass1 と
-    STAT\_LYC0 前半は一致、残置は line1 以降の位相境界ドリフト(+4〜8 dot)の反復較正。
-    解析ツール: /tmp/mbLcdonFail(1 実行 = 1 判定点)/ /tmp/mbBoot(LY 増分 dot 実測)。
-  - lcdon\_write\_timing-GS: LCD ON 書込みタイミング。lcdon\_timing-GS の方式を転用予定。
-    PPU 電源投入位相(boot クラスタと同類の定数問題)の可能性、未調査。
+- **PPU GS クラスタ**: vblank\_stat\_intr-GS **PASS(修正 12)**。残り:
+  - lcdon\_timing-GS: **PASS(修正 15)**。
+  - hblank\_ly\_scx\_timing-GS: **PASS(修正 15 — LY 増分 4 dot 前倒し)**。
+  - lcdon\_write\_timing-GS: LCD ON 書込みタイミング。修正 15 の窓/位相モデルを転用予定。
+- **boot\_regs-dmg0**: 修正 15 で FAIL に変動。固有の DMG0 対応差分を要確認。
 - **intr\_2\_mode0\_timing\_sprites**: 上記分析の通り per-dot OBJ フェッチパイプライン要。
 - **rapid\_di\_ei**: 参照実装でも既知の難関、後回し。
 - **Tetris 約40秒以降の無音**(上記観測メモ)。
