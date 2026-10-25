@@ -113,6 +113,15 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
 - (void)writeVRAM:(uint8_t)value address:(uint16_t)address {
     address &= 0x1FFF;
+    // VRAM 書込み禁止窓(dsi = LY 増分 anchor からの dots)。実機。lcdon_write_timing-GS
+    // VRAM 群 19 サンプル実測: 読出し([anchor+80, anchor+256))より START 側 4 dot 緩い。
+    //   line0(死相): [anchor+80, anchor+252)(読出しと同一)
+    //   通常 line:   [anchor+84, anchor+256)(= 可視 mode3。mode2 窓は書込み可)
+    if (self.lcdc & 0x80 && _mode != MBPPUModeVBlank) {
+        uint32_t s = _dotsSinceInc;
+        BOOL denied = _bootWindow ? (s >= 80 && s < 252) : (_mode == MBPPUModeDraw);
+        if (denied) return;
+    }
     ((uint8_t *)_vram.mutableBytes)[address] = value;
 }
 
@@ -135,8 +144,22 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 
 - (void)writeOAM:(uint8_t)value address:(uint16_t)address {
     address &= 0xFF;
-    // mode 3 中の OAM 書込みは捨てられる(実機同)
-    if (self.lcdc & 0x80 && _mode == MBPPUModeDraw) return;
+    // OAM 書込み禁止窓(dsi)。実機。lcdon_write_timing-GS OAM 群 19 サンプル実測:
+    //   line0(死相): [anchor+80, anchor+252)(読出しと同一)
+    //   通常 line:   [anchor+4, anchor+80)(mode2 前 76 dot)+ [anchor+84, anchor+256)
+    //   (= 可視 mode3)。mode2 最後の 4 dot([anchor+80, anchor+84))は書込み可。
+    // VBlank(mode1)中は無条件に書込み可。
+    if (self.lcdc & 0x80 && _mode != MBPPUModeVBlank) {
+        uint32_t s = _dotsSinceInc;
+        BOOL denied;
+        if (_bootWindow) {
+            denied = (s >= 80 && s < 252);
+        } else {
+            denied = (_mode == MBPPUModeDraw)
+                  || (_mode == MBPPUModeOAMScan && s < 80);
+        }
+        if (denied) return;
+    }
     ((uint8_t *)_oam.mutableBytes)[address] = value;
 }
 

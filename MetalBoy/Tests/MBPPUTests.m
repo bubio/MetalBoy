@@ -79,7 +79,9 @@ NS_ASSUME_NONNULL_BEGIN
                 if (!checkedMode2) {
                     checkedMode2 = YES;
                     XCTAssertEqual([ppu readOAM:2], 0xFF, "mode2 中の OAM 読みは 0xFF");
-                    [ppu writeOAM:0xAB address:2]; // 書込みは現行仕様では保持(将来 mode2 破棄へ)
+                    // mode2 前 76 dot の OAM 書込みは捨てられる(実機。
+                    // lcdon_write_timing-GS OAM 群 19 サンプル実測)
+                    [ppu writeOAM:0xAB address:2];
                 }
                 break;
             case 0x03: // Draw: ロック
@@ -99,7 +101,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     // 値の確定確認は mode0(HBlank)中に(HBlank を待つ)
     while ((ppu.statValue & 0x03) != 0x00) [ppu tickDots:1 ifRequest:&ifRequest];
-    XCTAssertEqual([ppu readOAM:2], 0xAB, "mode2 中に書んだ値が保持されている");
+    XCTAssertEqual([ppu readOAM:2], 0x00, "mode2 前 76 dot に書んだ値は破棄されている(lcdon_write_timing-GS)");
     XCTAssertEqual([ppu readOAM:3], 0x00, "mode3 中に書んだ値は破棄されている");
 }
 
@@ -151,17 +153,99 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
+/// OAM 書込み禁止窓(実機。Mooneye lcdon_write_timing-GS OAM 群 19 サンプル実測):
+/// line0(LCD ON 直後の死相)= [dsd+80, dsd+252)(読出し窓と同一)。
+/// dsd = 直近 anchor(LCD ON dot / LY 増分 dot)からの dots。
+- (void)testOAMWriteLockedAtLcdOn {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    uint8_t ifRequest = 0;
+    ppu.lcdc = 0x11; // LCD OFF
+    for (int i = 0; i < 60; i++) [ppu tickDots:4 ifRequest:&ifRequest];
+    ppu.lcdc = 0x81; // LCD ON → 死相
+    [ppu writeOAM:0x12 address:0];
+
+    // dsd 79(死相内): 書込み可・読出し可
+    for (int i = 0; i < 79; i++) [ppu tickDots:1 ifRequest:&ifRequest];
+    [ppu writeOAM:0xCD address:0];
+    XCTAssertEqual([ppu readOAM:0], 0xCD, "死相内(dsd<80)は OAM 書込み可");
+
+    // dsd 159(可視 mode3 相当): 書込み捨て(読出し禁止なので後段の読出しで検証)
+    for (int i = 0; i < 80; i++) [ppu tickDots:1 ifRequest:&ifRequest];
+    [ppu writeOAM:0xAB address:0];
+
+    // dsd 252(mode0 開始): 解放。読出して 0xAB が入っていないことを確認
+    for (int i = 0; i < 93; i++) [ppu tickDots:1 ifRequest:&ifRequest];
+    XCTAssertEqual([ppu readOAM:0], 0xCD, "line0 mode3 中の OAM 書込みは捨て");
+
+    // dsd 252+: 書込み・読出しとも可
+    [ppu writeOAM:0x77 address:1];
+    XCTAssertEqual([ppu readOAM:1], 0x77, "line0 mode0 開始(dsd>=252)で書込み可");
+}
+
+/// OAM 書込み禁止窓/通常 line(実機。lcdon_write_timing-GS OAM 群):
+/// [dsd+4, dsd+80)(mode2 前 76 dot)と [dsd+84, dsd+256)(mode3)は捨て。
+/// mode2 最後の 4 dot([dsd+80, dsd+84))は書込み可(読出しとの差)。
+- (void)testOAMWriteLockedDuringMode2NormalLine {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    uint8_t ifRequest = 0;
+    ppu.lcdc = 0x91;
+    // line1 の mode2(subsequent line)まで進める(dsd≈5)
+    while (ppu.ly != 1 || (ppu.statValue & 0x03) != 0x02) [ppu tickDots:1 ifRequest:&ifRequest];
+    // mode2 前 76 dot(raster 0-75): 書込み捨て(読出し禁止なので後段の読出しで検証)
+    [ppu writeOAM:0xAB address:2];
+
+    // mode2 最後の 4 dot(dsd 80-83): 書込み可
+    for (int i = 0; i < 76; i++) [ppu tickDots:1 ifRequest:&ifRequest];
+    [ppu writeOAM:0xCD address:2];
+    XCTAssertEqual(ppu.statValue & 0x03, 0x02, "書込み可窓はまだ mode2 中");
+
+    // mode3(dsd+84 以降): 書込み捨て
+    while ((ppu.statValue & 0x03) != 0x03) [ppu tickDots:1 ifRequest:&ifRequest];
+    [ppu writeOAM:0x88 address:2];
+
+    // mode0(書込み・読出しとも可)で照合: 0xAB/0x88 は捨て、0xCD のみ有効
+    while ((ppu.statValue & 0x03) != 0x00) [ppu tickDots:1 ifRequest:&ifRequest];
+    XCTAssertEqual([ppu readOAM:2], 0xCD, "mode2 前 76 dot と mode3 の OAM 書込みは捨て、mode2 最後 4 dot は有効");
+
+    [ppu writeOAM:0x5A address:2];
+    XCTAssertEqual([ppu readOAM:2], 0x5A, "mode0 中は OAM 書込み可");
+}
+
+/// VRAM 書込み禁止窓(実機。lcdon_write_timing-GS VRAM 群 19 サンプル実測):
+/// line0 = [dsd+80, dsd+252)(読出しと同一)/ 通常 line = [dsd+84, dsd+256)(mode3 のみ。
+/// mode2 窓は書込み可 = 読出し([dsd+80, dsd+256))より START 側 4 dot 緩い。
+- (void)testVRAMWriteLockedDuringMode3 {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    uint8_t ifRequest = 0;
+    ppu.lcdc = 0x91;
+    while (ppu.ly != 1 || (ppu.statValue & 0x03) != 0x02) [ppu tickDots:1 ifRequest:&ifRequest];
+    // mode2 窓(dsd<84 = raster<80): VRAM 書込み可・読出し可(OAM との違い)
+    [ppu writeVRAM:0x11 address:0];
+    XCTAssertEqual([ppu readVRAM:0], 0x11, "通常 line mode2 窓は VRAM 書込み可");
+
+    // mode3(dsd>=84): 書込み捨て
+    while ((ppu.statValue & 0x03) != 0x03) [ppu tickDots:1 ifRequest:&ifRequest];
+    [ppu writeVRAM:0x22 address:0];
+
+    // mode0: 読出し可に戻って照合
+    while ((ppu.statValue & 0x03) != 0x00) [ppu tickDots:1 ifRequest:&ifRequest];
+    XCTAssertEqual([ppu readVRAM:0], 0x11, "通常 line mode3 中の VRAM 書込みは捨て");
+
+    [ppu writeVRAM:0x33 address:0];
+    XCTAssertEqual([ppu readVRAM:0], 0x33, "mode0 開始で VRAM 書込み可");
+}
+
 /// LCD ON 直後の死相(実機。Mooneye lcdon_timing-GS 実測からの定数):
-/// 死相 84 dots(LY=0 固定・モード読出し 0・OAM/VRAM アクセス可)→ mode3(172)
-/// → mode0 196(LY 増分 = 計 452)。line1 以降は通常 456-dot ライン。
+/// 死相 80 dots(LY=0 固定・モード読出し 0・OAM/VRAM アクセス可)→ mode3(172)
+/// → mode0 204(LY 増分 = mode0 終端の 4 dot 前=452)。line1 以降は通常 456-dot ライン。
 - (void)testLCDOnBootPhase {
     MBPPU *ppu = [[MBPPU alloc] init];
     uint8_t ifRequest = 0;
 
-    ppu.lcdc = 0x11; // LCD OFF(0x91 相当を bit7 落とした状態)
+    ppu.lcdc = 0x11; // LCD OFF(0x81 相当を bit7 落とした状態)
     for (int i = 0; i < 60; i++) [ppu tickDots:4 ifRequest:&ifRequest];
 
-    ppu.lcdc = 0x81; // LCD ON 遷移 → 死相 84 dots 設定
+    ppu.lcdc = 0x81; // LCD ON 遷移 → 死相 80 dots 設定
     // 死相中(60/240 dots): STAT = bit7+coincidence(bit2: LY=0==LYC=0)、モード 0
     for (int i = 0; i < 15; i++) [ppu tickDots:4 ifRequest:&ifRequest];
     XCTAssertEqual(ppu.ly, 0, "死相中 LY=0");
@@ -182,8 +266,8 @@ NS_ASSUME_NONNULL_BEGIN
         [ppu tickDots:1 ifRequest:&ifRequest];
         flipDots++;
     }
-    XCTAssertGreaterThanOrEqual(flipDots, 440, "LY 増分は死相 84 + mode3 172 + mode0 196 ≈ 452");
-    XCTAssertLessThanOrEqual(flipDots, 468, "LY 増分は死相 84 + mode3 172 + mode0 196 ≈ 452");
+    XCTAssertGreaterThanOrEqual(flipDots, 440, "LY 増分は死相 80 + mode3 172 + mode0 204 ≈ 452");
+    XCTAssertLessThanOrEqual(flipDots, 468, "LY 増分は死相 80 + mode3 172 + mode0 204 ≈ 452");
 }
 
 @end

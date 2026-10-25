@@ -555,6 +555,50 @@ lcdon\_timing-GS・hblank\_ly\_scx\_timing-GS・boot\_regs-dmgABC の +3。
 単体テスト testLCDOnBootPhase・testOAMLockedDuringMode3(mode2 で読み 0xFF 期待に改訂)・
 testSTATMode2InterruptAtVBlankStart(LY=143 初観測が 4 dot 前になったため 459+1 dot に改訂)。
 
+### 修正 16: OAM/VRAM 書込み禁止窓(実機。lcdon_write_timing-GS PASS)(2026-10-25)
+
+lcdon_write_timing-GS(LCD ON 直後の OAM/VRAM「書込み」可否を 19 位置×2 で確認)
+を HRAM fail_round ダンプ + 期待表 4-dot 解析(mbLcdonWrite)で攻略した。
+書込みドット W(n) = 4n + C0(n = nop 数)、C0 ∈ [8,12)(読出し較正と同一幅)で
+期待 19×2 = 38 件すべて整合。実測から確定した書込み窓(dsd = dsi anchor からの dots):
+
+```
+OAM  書込み捨て: line0(死相) = [anchor+80, anchor+252)(読出しと同一)
+                通常 line    = [anchor+4, anchor+80) ∪ [anchor+84, anchor+256)
+                  (mode2 前 76 dot と mode3。mode2 最後の 4 dot [80,84) は書込み可)
+VRAM 書込み捨て: line0 = [anchor+80, anchor+252)(読出しと同一)
+                通常 line = [anchor+84, anchor+256)(= 可視 mode3 のみ。
+                  mode2 窓(raster<80)は書込み可 = 読出し([80,256))より START 側 4 dot 緩い)
+VBlank(mode1)中は無条件に書込み可。
+```
+
+代表作例: 通常 line の dsd 4(D)は OAM 書込み捨て/VRAM 可、dsd 80(D)は OAM 可、
+dsd 84(D)は両方捨て(raster では OAM 76 で可/80 で不可、VRAM 80 で不可)。
+検証: lcdon_write_timing-GS **PASS**。
+単体テスト: testOAMWriteLockedAtLcdOn / testOAMWriteLockedDuringMode2NormalLine /
+testVRAMWriteLockedDuringMode3 追加、testOAMLockedDuringMode3(mode2 前 76 dot の
+書込み捨てに改訂)、testLCDOnBootPhase(残っていた死相 84/mode0 196 の旧定数コメントを
+80/204 に整備)。
+
+**boot 系 BIOS 供給計測の確定**: mbmooneye_bios(実 BIOS = DMG0 リビジョン)で
+boot_regs-dmg0 **PASS**、boot_regs-dmgABC は BIOS なし電源投入レジスタの再現で PASS
+(実 BIOS の最終レジスタとは別モデルの期待値のため FAIL)。修正 15 直前コミット
+(48225bc)でも boot_regs-dmg0 PASS を再現し、「修正 15 で FAIL 化した」のは
+BIOS なしランナーでの分類差(偽リグレッション)であったこと解決。
+boot_div/boot_hwio-dmg0(実自動実装で本来 PASS し得る)は FAIL のまま:
+BIOS 起動中の DIV 観測 = 32 31 34 33 36 35(期待 19 1A 1A 1B 1C 1E)=
+起動総 M 数のずれ(PPU 実装 LY 待ちループ?) + DIV 位相差で、電源投入位相
+オラクルなしに確定不能のまま(boot クラスタ分析打ち切り維持)。
+
+隣接計測(修正 15 の定数・窓が intr_2 系を壊していないか): intr_2_oam_ok_timing /
+intr_2_mode0_timing は修正 16 後も PASS(修正 15 隣接再計測 1 回は必須化条件を消化)。
+
+**Mooneye 結果(2026-10-25 修正 16 時点、75 本): 60 PASS / 13 FAIL / 2 判定不能**
+(lcdon_write_timing-GS +1。60/13 に移行。bios 供給で boot_regs-dmg0 が PASS の点を
+含めた「実質』の見取り図: (BIOS なしランナー: 60/13/2)。なお /tmp 清掃により
+再構築: mooneye-test-suite(WLA-DX, brew wla-dx)/ mbmooneye・mbmooneye_bios・
+mbLcdonWrite(再リンク手順は同じ)。
+
 ### 観測メモ: Tetris の約 40 秒以降の無音
 
 変更前後で同一のため DMA 修正の影響ではない。1200F(20秒)では BGM nonzero 88.8%。
@@ -565,7 +609,9 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
 ### 既知の未通過(精密化バックログ)
 
 - **boot\_div/boot\_hwio/boot\_regs-\*・boot\_sclk\_align(-dmgABC/mgb/-S/-sgb\*)**: BIOS
-  ハンドオーバ時のレジスタ/DIV 値の実機一致性。**boot\_regs-dmg0 は PASS**(BIOS 供給ランナー)。
+  ハンドオーバ時のレジスタ/DIV 値の実機一致性。**boot\_regs-dmg0 は PASS(実 BIOS
+  供給ランナー・修正 16 確定)**。BIOS なし電源投入値は dmgABC 群相当のため
+  dmg0 期待値と一致しない(では BIOS なしランナーでは常に FAIL、分裂は正常)。
   boot\_div・boot\_hwio は上記詳細計測の通り ~+6,269 dots の位相差のみ。
   ハードオラクル(実機の電源投入時ライン位相)が得られない限り一旦 close
   (boot\_regs-dmgABC/mgb/sgb/sgb2 は複数モデルの BIOS 差分のため要ランナー対応)。
@@ -573,8 +619,7 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
 - **PPU GS クラスタ**: vblank\_stat\_intr-GS **PASS(修正 12)**。残り:
   - lcdon\_timing-GS: **PASS(修正 15)**。
   - hblank\_ly\_scx\_timing-GS: **PASS(修正 15 — LY 増分 4 dot 前倒し)**。
-  - lcdon\_write\_timing-GS: LCD ON 書込みタイミング。修正 15 の窓/位相モデルを転用予定。
-- **boot\_regs-dmg0**: 修正 15 で FAIL に変動。固有の DMG0 対応差分を要確認。
+  - lcdon\_write\_timing-GS: **PASS(修正 16 — OAM/VRAM 書込み窓)**。
 - **intr\_2\_mode0\_timing\_sprites**: 上記分析の通り per-dot OBJ フェッチパイプライン要。
 - **rapid\_di\_ei**: 参照実装でも既知の難関、後回し。
 - **Tetris 約40秒以降の無音**(上記観測メモ)。
