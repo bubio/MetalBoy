@@ -620,6 +620,22 @@ length カウンタ悪用? または検証ツール側の録音区間の問題)�
   - lcdon\_timing-GS: **PASS(修正 15)**。
   - hblank\_ly\_scx\_timing-GS: **PASS(修正 15 — LY 増分 4 dot 前倒し)**。
   - lcdon\_write\_timing-GS: **PASS(修正 16 — OAM/VRAM 書込み窓)**。
-- **intr\_2\_mode0\_timing\_sprites**: 上記分析の通り per-dot OBJ フェッチパイプライン要。
+- **intr\_2\_mode0\_timing\_sprites**: **PASS(修正 17 — OBJ penalty 式)**。
 - **rapid\_di\_ei**: 参照実装でも既知の難関、後回し。
 - **Tetris 約40秒以降の無音**(上記観測メモ)。
+
+### 修正 17: OBJ による mode 3 伸長(2026-10-26)
+
+per-dot OBJ フェッチパイプラインは不要だった。mode 3 開始時に Pan Docs の OBJ penalty 式で
+伸長 dots を求め、M-cycle 単位に切り捨てて `_mode3Length` に加算する(`spritePenaltyDots`)。
+
+- 対象: OAM 順で line に掛かる最大 10 体のうち X<168(LCDC bit1=0 なら 0)
+- BG タイル(`(X + SCX&7) >> 3`)ごとに最初の 1 体は `11 - min(5, (X+SCX)&7)`、同一タイルの
+  2 体目以降は 6 dots
+- `4 * floor(合計/4)` が intr\_2\_mode0\_timing\_sprites の extra cycles 表全 100 ケースと一致
+- SCX 伸長(切り上げ)と OBJ 伸長(切り捨て)の丸め方向は異なる。SCX≠0 かつ OBJ ありの
+  組合せは Mooneye に検証ケースがなく未検証
+- per-dot パイプライン試作(旧 WIP: 修正 19/20 を含む)は timer/PPU で 8 本退行(53/75)したため破棄
+
+**Mooneye 結果(修正 17 時点): 61 PASS / 12 FAIL / 2 TIMEOUT**(intr\_2\_mode0\_timing\_sprites +1、退行なし)。
+単体テスト 79/79。

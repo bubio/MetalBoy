@@ -244,7 +244,8 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
                     // mode 3 長は SCX&7 で伸縮(実機。Mooneye hblank_ly_scx_timing-GS:
                     // SCX&7=0 → +0 / 1-4 → +4 dots / 5-7 → +8 dots)
                     uint32_t n = self.scx & 0x07;
-                    _mode3Length = MBPPUMode3BaseLength + (n == 0 ? 0 : (4 * ((n + 3) / 4)));
+                    _mode3Length = MBPPUMode3BaseLength + (n == 0 ? 0 : (4 * ((n + 3) / 4)))
+                        + 4 * ([self spritePenaltyDots] / 4);
                 }
                 break;
             case MBPPUModeDraw:
@@ -332,6 +333,33 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
 }
 
 #pragma mark - 描画(1 ライン = 160 ピクセル)
+
+/// 現ラインの OBJ による mode 3 伸長 dots(Pan Docs OBJ penalty)。
+/// OAM 順で line に掛かる最大 10 体のうち X<168 を対象に、BG タイル単位で
+/// 最初の 1 体は 11 - min(5, (X+SCX)&7)、同一タイル内の 2 体目以降は 6 dots。
+/// 呼び出し側で M-cycle 単位に切り捨てる(Mooneye intr_2_mode0_timing_sprites)。
+- (uint32_t)spritePenaltyDots {
+    if (!(self.lcdc & 0x02)) return 0;
+    const uint8_t *oam = (const uint8_t *)_oam.bytes;
+    int32_t height = (self.lcdc & 0x04) ? 16 : 8;
+    BOOL tileSeen[32] = {NO};
+    uint32_t penalty = 0;
+    for (NSInteger found = 0, si = 0; si < 40 && found < 10; si++) {
+        int32_t screenY = (int32_t)oam[si * 4] - 16;
+        if ((int32_t)self.ly < screenY || (int32_t)self.ly >= screenY + height) continue;
+        found++;
+        uint8_t x = oam[si * 4 + 1];
+        if (x >= 168) continue;
+        uint32_t pos = (uint32_t)x + (self.scx & 0x07);
+        if (tileSeen[pos >> 3]) {
+            penalty += 6;
+        } else {
+            tileSeen[pos >> 3] = YES;
+            penalty += 11 - MIN(5u, pos & 0x07);
+        }
+    }
+    return penalty;
+}
 
 - (void)renderCurrentScanline {
     if (!(self.lcdc & 0x80)) return;

@@ -153,6 +153,46 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
+/// LY=1 の mode3 長を dots 計数する(スプライトは Y=16 で line 0-7 に掛かる)
+- (uint32_t)mode3LengthWithSpriteXs:(const uint8_t *)xs count:(NSUInteger)count lcdc:(uint8_t)lcdc {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    [ppu setLcdc:0x00];
+    for (NSUInteger i = 0; i < count; i++) {
+        [ppu writeOAM:16 address:(uint16_t)(i * 4)];
+        [ppu writeOAM:xs[i] address:(uint16_t)(i * 4 + 1)];
+    }
+    [ppu writeSTAT:0x00];
+    [ppu setLcdc:lcdc];
+    uint8_t ifRequest = 0;
+    while (!(ppu.ly == 1 && (ppu.statValue & 0x03) == 0x02)) [ppu tickDots:1 ifRequest:&ifRequest];
+    while ((ppu.statValue & 0x03) != 0x03) [ppu tickDots:1 ifRequest:&ifRequest];
+    uint32_t len = 0;
+    do {
+        [ppu tickDots:1 ifRequest:&ifRequest];
+        len++;
+    } while ((ppu.statValue & 0x03) == 0x03 && len < 400);
+    return len;
+}
+
+/// OBJ による mode3 伸長(Pan Docs OBJ penalty: 1 体 11 - min(5, (X+SCX)&7) dots、
+/// 同一 BG タイル内の 2 体目以降は 6 dots、X>=168 は対象外)。M-cycle 単位に切り捨て
+/// (Mooneye intr_2_mode0_timing_sprites の extra cycles 表と一致)。
+- (void)testMode3LengthSpritePenalty {
+    static const uint8_t x0[1] = {0};
+    XCTAssertEqual([self mode3LengthWithSpriteXs:x0 count:1 lcdc:0x93], 172 + 8u, "X=0: 11 dots → 2 M");
+    static const uint8_t x5[1] = {5};
+    XCTAssertEqual([self mode3LengthWithSpriteXs:x5 count:1 lcdc:0x93], 172 + 4u, "X=5: 6 dots → 1 M");
+    static const uint8_t ten0[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    XCTAssertEqual([self mode3LengthWithSpriteXs:ten0 count:10 lcdc:0x93], 172 + 64u, "同一タイル 10 体: 65 dots → 16 M");
+    static const uint8_t spread[10] = {2, 10, 18, 26, 34, 42, 50, 58, 66, 74};
+    XCTAssertEqual([self mode3LengthWithSpriteXs:spread count:10 lcdc:0x93], 172 + 88u, "別タイル 10 体: 90 dots → 22 M");
+    static const uint8_t split[10] = {4, 4, 4, 4, 4, 164, 164, 164, 164, 164};
+    XCTAssertEqual([self mode3LengthWithSpriteXs:split count:10 lcdc:0x93], 172 + 60u, "2 群: 62 dots → 15 M");
+    static const uint8_t off[10] = {168, 168, 168, 168, 168, 168, 168, 168, 168, 168};
+    XCTAssertEqual([self mode3LengthWithSpriteXs:off count:10 lcdc:0x93], 172u, "X>=168 は伸長なし");
+    XCTAssertEqual([self mode3LengthWithSpriteXs:ten0 count:10 lcdc:0x91], 172u, "OBJ 無効(LCDC bit1=0)は伸長なし");
+}
+
 /// OAM 書込み禁止窓(実機。Mooneye lcdon_write_timing-GS OAM 群 19 サンプル実測):
 /// line0(LCD ON 直後の死相)= [dsd+80, dsd+252)(読出し窓と同一)。
 /// dsd = 直近 anchor(LCD ON dot / LY 増分 dot)からの dots。
