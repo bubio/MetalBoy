@@ -98,6 +98,9 @@ NS_ASSUME_NONNULL_BEGIN
         return consumed ? nil : event;
     }];
 
+    // ウィンドウを閉じたらアプリを終了する(windowWillClose: → terminate)
+    window.window.delegate = self;
+    [self installMainMenu];
     [window showWindow:self];
     [NSApp activateIgnoringOtherApps:YES];
 
@@ -107,6 +110,17 @@ NS_ASSUME_NONNULL_BEGIN
     // terminate まで戻らない(セーブは NSApplicationWillTerminateNotification で)
     [NSApp run];
     return 0;
+}
+
+/// Cmd+Q で終了できるよう、アプリケーションメニューに Quit 項目だけを置く
+- (void)installMainMenu {
+    NSMenu *mainMenu = [[NSMenu alloc] init];
+    NSMenuItem *appItem = [[NSMenuItem alloc] init];
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    [appMenu addItemWithTitle:@"MetalBoy を終了" action:@selector(terminate:) keyEquivalent:@"q"];
+    appItem.submenu = appMenu;
+    [mainMenu addItem:appItem];
+    NSApp.mainMenu = mainMenu;
 }
 
 #pragma mark - key events
@@ -160,6 +174,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)windowWillClose:(NSNotification *)notification {
     [self cleanupSession];
     [NSApp terminate:self];
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    return YES;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
