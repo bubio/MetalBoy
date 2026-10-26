@@ -6,6 +6,7 @@
 #import "MBEmulatorSession.h"
 #import "MBErrors.h"
 #import "MBPorts.h"
+#import "MBTestROMReport.h"
 #import <signal.h>
 #import <stdio.h>
 
@@ -83,6 +84,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     session.renderPort = window;
     session.audioOutPort = audio;
+    session.logPort = [[MBStderrLogPort alloc] init]; // 未実装挙動の記録(憲法 V)
     self.session = session;
     self.windowController = window;
     self.audioEngine = audio;
@@ -100,7 +102,8 @@ NS_ASSUME_NONNULL_BEGIN
 
     // ウィンドウを閉じたらアプリを終了する(windowWillClose: → terminate)
     window.window.delegate = self;
-    [self installMainMenu];
+    // FR-002: メニューを持たない。未設定だと AppKit が既定のアプリメニューを生成するため空にする
+    NSApp.mainMenu = [[NSMenu alloc] init];
     [window showWindow:self];
     [NSApp activateIgnoringOtherApps:YES];
 
@@ -112,23 +115,18 @@ NS_ASSUME_NONNULL_BEGIN
     return 0;
 }
 
-/// Cmd+Q で終了できるよう、アプリケーションメニューに Quit 項目だけを置く
-- (void)installMainMenu {
-    NSMenu *mainMenu = [[NSMenu alloc] init];
-    NSMenuItem *appItem = [[NSMenuItem alloc] init];
-    NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:@"MetalBoy を終了" action:@selector(terminate:) keyEquivalent:@"q"];
-    appItem.submenu = appMenu;
-    [mainMenu addItem:appItem];
-    NSApp.mainMenu = mainMenu;
-}
-
 #pragma mark - key events
 
 /// ゲームキーをエミュ入力へ写像したら YES を返す(モニタで消費 → AppKit 未処理ビープ防止)。
-/// Cmd/Ctrl/Option が押されている場合はメニュー等のショートカットを優先(消費しない)。
+/// Cmd+Q 以外で Cmd/Ctrl/Option が押されている場合は消費しない。
 - (BOOL)dispatchKeyEvent:(NSEvent *)event {
     BOOL pressed = (event.type == NSEventTypeKeyDown);
+    // Cmd+Q は終了操作(FR-002 によりメニューを持たないため、キーモニタで直接処理する)
+    if (pressed && (event.modifierFlags & NSEventModifierFlagCommand)
+        && [event.charactersIgnoringModifiers caseInsensitiveCompare:@"q"] == NSOrderedSame) {
+        [NSApp terminate:self];
+        return YES;
+    }
     if (pressed && (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption))) {
         return NO;
     }

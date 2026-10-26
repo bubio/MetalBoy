@@ -13,6 +13,8 @@ SC-007(テスト ROM の合格)で使用するスイートと合格基準の一�
 metalboy-testrom /path/to/<suite>.gb --frames <N>
 
 # --frames を省略した場合は 1800 フレーム(約 30 秒)駆動する
+# --json: 結果・シリアル出力・ログイベント(未実装挙動等)を 1 つの JSON で stdout へ
+metalboy-testrom /path/to/<suite>.gb --json   # → {"passed":true,"serial":"...","events":[...]}
 ```
 
 - ランナーはシリアル出力(SB `$FF01` / SC `$FF02`)を blargg 形式
@@ -27,7 +29,7 @@ metalboy-testrom /path/to/<suite>.gb --frames <N>
 | blargg cpu_instrs(各サブテスト) | `metalboy-testrom /path/to/cpu_instrs/01-special.gb --frames 900` | `Passed` |
 | blargg instr_timing | `metalboy-testrom /path/to/instr_timing.gb --frames 1800` | `Passed` |
 | blargg mem_timing(01/02/03) | `metalboy-testrom /path/to/mem_timing/01.gb --frames 900` | `Passed` |
-| blargg halt_bug(参考) | `metalboy-testrom /path/to/halt_bug.gb --frames 1800` | `Passed` |
+| blargg halt_bug(参考・画面出力のみでシリアル判定不可) | `metalboy-testrom /path/to/halt_bug.gb --frames 1800` | `Passed` |
 
 - 合格率は **100%**(SC-007 の基準)
 - blargg 系 ROM は各サブテストごとに独立した ROM を実行する

@@ -19,7 +19,7 @@ xcodebuild ... test -only-testing:MetalBoyTests/MBPPUTests/testXxx
 
 # ヘッドレステスト ROM ランナー（シリアル出力を stdout へ、"Passed" で合格）
 xcodebuild -project MetalBoy.xcodeproj -scheme metalboy-testrom build
-metalboy-testrom /path/to/rom.gb --frames 1800
+metalboy-testrom /path/to/rom.gb --frames 1800 [--json]
 # Mooneye 判定ツール（PASS/FAIL/TIMEOUT を出力）
 xcodebuild -project MetalBoy.xcodeproj -scheme metalboy-mooneye build
 metalboy-mooneye /path/to/rom.gb [--bios <path>] [--seconds N]

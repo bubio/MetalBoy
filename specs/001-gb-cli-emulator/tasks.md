@@ -233,3 +233,11 @@ Task: "Tests/Core/MBPPUTests.m"
 - Checkpoint で仕様の該当受け入れシナリオを通す(spec 別記)
 - やってはならない: コア層への AppKit 侵入(原則 VI)・既定値
   フォールバック(FR-005)・キー割当変更(FR-008)・オプション永続化(FR-006)
+
+## Phase 7: Convergence
+
+- [X] T041 CRITICAL: 未実装・未確定挙動(未知オペコード・未対応 IO 書込み等)を `MBLogPort logEvent:message:` へ記録する経路を `MetalBoy/Sources/Core/CPU/MBCPU.m` → `MetalBoy/Sources/Features/Emulation/MBEmulatorSession.m` に結線し、`logPort` が実際に呼ばれることを単体テストで確認する per Constitution V (missing)
+- [X] T042 CRITICAL: tracing / デバッグ用の CLI 出力(stdout、人間可読と機械可読 JSON の両対応)を `metalboy-testrom` に追加する(例: `--json` で結果・シリアル出力・ログイベントを JSON 出力)per Constitution V (missing)
+- [X] T043 メインメニュー(`installMainMenu`)を削除し、Cmd+Q による終了は `MetalBoy/Sources/UI/App/MBAppDelegate.m` のキーモニタで `[NSApp terminate:]` を呼ぶ方式に置き換える per FR-002 (contradicts)
+- [ ] T044 BIOS 読込み経路(`MBGameBoy.bootROMData`・`metalboy-mooneye --bios`)を製品経路(MetalBoy アプリ・MBEmulatorSession)から到達不能であることを確認し、開発ツール限定の例外として spec 側での扱いをレビュー・判断する per FR-007 (contradicts)
+- [ ] T045 blargg mem_timing(01/02/03)と halt_bug を `metalboy-testrom` で実行し、合格を `MetalBoy/Tests/TEST-ROMS.md` に記録する per SC-007 (partial)

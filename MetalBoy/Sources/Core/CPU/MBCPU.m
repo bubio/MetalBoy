@@ -70,7 +70,9 @@ static inline uint16_t Add16NoZero(uint16_t a, uint16_t b, uint8_t *outFlags) {
 @property (nonatomic) NSUInteger ticksDone; // 直近命令で既に吐き出した M-cycle 数
 @end
 
-@implementation MBCPU
+@implementation MBCPU {
+    uint64_t _reportedOpcodes[4]; // 通知済み未定義オペコード(256 bit)
+}
 
 - (instancetype)init {
     return [self initWithPowerOnStates];
@@ -627,7 +629,12 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0x08: { uint16_t addr = CPUFetch16(self, bus); [bus cpuWrite:(uint8_t)(_sp & 0xFF) address:addr]; [self tickM:bus]; [bus cpuWrite:(uint8_t)(_sp >> 8) address:(uint16_t)(addr + 1)]; [self tickM:bus]; cycleCount = 5; } break;
 
         default:
-            cycleCount = 1; // 未知オペコードは NOP として扱う(MBLogPort 記録は bus 側で)
+            cycleCount = 1; // 未定義オペコードは NOP として扱う(実機はロックアップ)
+            if (_unimplementedBehaviorHandler && !(_reportedOpcodes[opcode >> 6] & (1ULL << (opcode & 63)))) {
+                _reportedOpcodes[opcode >> 6] |= 1ULL << (opcode & 63);
+                _unimplementedBehaviorHandler([NSString stringWithFormat:
+                    @"未定義オペコード $%02X を NOP として実行(PC=$%04X)", opcode, (uint16_t)(_pc - 1)]);
+            }
             break;
     }
 

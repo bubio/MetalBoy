@@ -284,6 +284,21 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertEqual((cpu.registerF & 0x40), 0x40, "DEC (HL): N");
     XCTAssertEqual((cpu.registerF & 0x20), 0x20, "DEC (HL): 貸借 H");
 }
+/// DMG 未定義オペコード($D3 等)は NOP 扱いのまま、未実装挙動として 1 回だけ通知する(憲法 V)
+- (void)testIllegalOpcodeReportsUnimplementedBehaviorOnce {
+    MBCPU *cpu = [[MBCPU alloc] init];
+    MBTestBus *bus = [self makeBus];
+    [bus loadProgram:@[@0xD3, @0xD3, @0xDB] atAddress:0x0100];
+    NSMutableArray<NSString *> *messages = [NSMutableArray array];
+    cpu.unimplementedBehaviorHandler = ^(NSString *message) { [messages addObject:message]; };
+    [cpu stepWithBus:bus];
+    [cpu stepWithBus:bus];
+    [cpu stepWithBus:bus];
+    XCTAssertEqual(cpu.pc, 0x0103, "未定義オペコードは 1 byte NOP として進む");
+    XCTAssertEqual(messages.count, 2u, "同一オペコードの通知は 1 回のみ($D3, $DB)");
+    XCTAssertTrue([messages.firstObject containsString:@"D3"]);
+}
+
 @end
 
 NS_ASSUME_NONNULL_END

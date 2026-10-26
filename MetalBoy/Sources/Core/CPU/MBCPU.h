@@ -42,6 +42,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setPC:(uint16_t)pc;
 /// 割り込みIME
 @property (nonatomic, readonly) BOOL ime;
+/// 未実装・未定義挙動の通知先(未定義オペコードはオペコードごとに 1 回だけ)。nil 可
+@property (nonatomic, nullable, copy) void (^unimplementedBehaviorHandler)(NSString *message);
 
 @end
 

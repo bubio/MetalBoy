@@ -27,6 +27,28 @@ static NSData *MakeSerialOutputROM(void) {
     return [NSData dataWithBytes:rom length:sizeof(rom)];
 }
 
+// テスト用 ROM: $100 に DMG 未定義オペコード $D3 → 無限ループ(jr -2)
+static NSData *MakeIllegalOpcodeROM(void) {
+    uint8_t rom[0x8000];
+    memset(rom, 0x00, sizeof(rom));
+    const uint8_t program[] = { 0xD3, 0x18, 0xFE };
+    memcpy(rom + 0x100, program, sizeof(program));
+    return [NSData dataWithBytes:rom length:sizeof(rom)];
+}
+
+// ログイベントを記録するテスト用 LogPort
+@interface MBRecordingLogPort : NSObject <MBLogPort>
+@property (nonatomic, strong) NSMutableArray<NSString *> *unimplementedMessages;
+@end
+
+@implementation MBRecordingLogPort
+- (void)logEvent:(MBLogEvent)event message:(NSString *)message {
+    if (event != MBLogEventUnimplementedBehavior) return;
+    if (self.unimplementedMessages == nil) self.unimplementedMessages = [NSMutableArray array];
+    [self.unimplementedMessages addObject:message];
+}
+@end
+
 // フレームバッファを記録するテスト用 RenderPort
 @interface MBRecordingRenderPort : NSObject <MBRenderPort>
 @property (nonatomic) NSUInteger presentCount;
@@ -163,6 +185,19 @@ static NSData *MakeSerialOutputROM(void) {
     XCTAssertNotNil(saved, "stop 時に .sav が書かれる");
     XCTAssertEqual(saved.length, (NSUInteger)0x2000);
     XCTAssertEqual(((const uint8_t *)saved.bytes)[1], 0x42, "$A001 に書込んだ値が保存される");
+}
+
+/// 未実装挙動はセッションの logPort へ MBLogEventUnimplementedBehavior として届く(憲法 V)
+- (void)testUnimplementedBehaviorReachesLogPort {
+    NSString *path = [self writeROM:MakeIllegalOpcodeROM() name:@"illegal.gb"];
+    MBLaunchOptions *options = [[MBLaunchOptions alloc] initWithROMPath:path scale:3 volumePercent:50];
+    NSError *error = nil;
+    MBEmulatorSession *session = [[MBEmulatorSession alloc] initWithOptions:options error:&error];
+    XCTAssertNotNil(session);
+    MBRecordingLogPort *logPort = [[MBRecordingLogPort alloc] init];
+    session.logPort = logPort;
+    [session runFrames:1];
+    XCTAssertEqual(logPort.unimplementedMessages.count, 1u);
 }
 
 @end

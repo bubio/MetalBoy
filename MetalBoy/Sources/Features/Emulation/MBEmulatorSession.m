@@ -106,6 +106,11 @@ static const double kFramesPerSecond = 59.7275;
                                                     @"エミュレーション初期化に失敗しました"}];
         return nil;
     }
+    // 未実装・未定義挙動は logPort へ記録する(憲法 V)
+    __weak MBEmulatorSession *weakSelf = self;
+    _machine.cpu.unimplementedBehaviorHandler = ^(NSString *message) {
+        [weakSelf.logPort logEvent:MBLogEventUnimplementedBehavior message:message];
+    };
     _runQueue = dispatch_queue_create("com.metalboy.emulation", DISPATCH_QUEUE_SERIAL);
     _doneSemaphore = dispatch_semaphore_create(0);
     _stopped = NO;
