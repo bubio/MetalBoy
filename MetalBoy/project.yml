@@ -48,13 +48,23 @@ targets:
     type: tool
     platform: macOS
     sources:
-      - path: Sources/Tools
+      - path: Sources/Tools/TestROM
     dependencies:
       - target: MetalBoyFeatures
       - target: MetalBoyCore
     settings:
       base:
         PRODUCT_NAME: metalboy-testrom
+  metalboy-mooneye:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Tools/Mooneye
+    dependencies:
+      - target: MetalBoyCore
+    settings:
+      base:
+        PRODUCT_NAME: metalboy-mooneye
   MetalBoyTests:
     type: bundle.unit-test
     platform: macOS
@@ -79,3 +89,7 @@ schemes:
     build:
       targets:
         metalboy-testrom: all
+  metalboy-mooneye:
+    build:
+      targets:
+        metalboy-mooneye: all

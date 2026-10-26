@@ -9,7 +9,7 @@ SC-007(テスト ROM の合格)で使用するスイートと合格基準の一�
 (`.gitignore` の `*.gb` / `*.gbc` 除外ポリシー)。
 
 ```sh
-# 実行形式(ランナーは Sources/Tools/main.m・ターゲット metalboy-testrom)
+# 実行形式(ランナーは Sources/Tools/TestROM/main.m・ターゲット metalboy-testrom)
 metalboy-testrom /path/to/<suite>.gb --frames <N>
 
 # --frames を省略した場合は 1800 フレーム(約 30 秒)駆動する
@@ -39,3 +39,42 @@ metalboy-testrom /path/to/<suite>.gb --frames <N>
 - 現実装は研究 R-6 の簡易化(simple CPU/PPU/APU/TIMER 体制)を取るため、
   本スイート一覧は MBC 動作・シリアル経路の最低合格ラインを基準にする
 - RTC 簡易対応のため、MBC3 + RTC を含むスイートは簡易動作のみ検証対象外
+
+## Mooneye テストスイート(acceptance 75 本)
+
+精密度の主要指標。コミットメッセージ末尾の `(Mooneye N/75)` はこのスイートの PASS 数。
+
+判定は専用ツール `metalboy-mooneye`(`Sources/Tools/Mooneye/main.m`)で行う。
+`metalboy-testrom` は結果のバイト列を判定できないため使わない。
+
+### ROM の入手
+
+`Gekkio/mooneye-test-suite` をソースからビルドする(要 `brew install wla-dx`)。
+
+```sh
+git clone https://github.com/Gekkio/mooneye-test-suite /tmp/mts-src
+make -C /tmp/mts-src        # → /tmp/mts-src/build/acceptance/**/*.gb
+```
+
+prebuilt 版(`https://gekkio.fi/files/mooneye-test-suite/`、検証時は mts-20260714-0944-31510e1)でもよい。
+
+### ビルドと実行
+
+```sh
+cd MetalBoy
+xcodebuild -project MetalBoy.xcodeproj -scheme metalboy-mooneye build
+M=Build/Products/Debug/metalboy-mooneye
+$M <rom.gb> [--bios <path>] [--seconds N]   # 既定 15 秒(実時間)で打切り
+# 全件
+find /tmp/mts-src/build/acceptance -name '*.gb' | sort | \
+  while read r; do $M "$r"; done | tee /tmp/mooneye_results.txt
+grep -c '^PASS' /tmp/mooneye_results.txt
+```
+
+- 判定はシリアル quit プロトコル: `03 05 08 0D 15 22`(Fibonacci)= `PASS`(終了コード 0)、
+  `42`×6 = `FAIL`(1)、時間内にどちらも来なければ `TIMEOUT`(2, レジスタ・IO・PPU 状態を併記)
+- 修正前後で結果ファイルを `diff` し、FAIL 集合が増えていないこと(リグレッションなし)を確認する
+- `boot_*` 系は電源投入時の状態を見るため BIOS の有無で結果が変わる。`--bios` で
+  実 DMG BIOS を `gb.bootROMData` に供給して起動できる。
+  `boot_regs-dmg0` は BIOS 供給時のみ PASS が正しい
+- 現状の PASS 数と未通過の内訳は `docs/core-fidelity-notes.md` の「Mooneye 結果」節を参照
