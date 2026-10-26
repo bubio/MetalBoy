@@ -28,8 +28,23 @@ metalboy-testrom /path/to/<suite>.gb --json   # → {"passed":true,"serial":"...
 |---------|--------|------------------|
 | blargg cpu_instrs(各サブテスト) | `metalboy-testrom /path/to/cpu_instrs/01-special.gb --frames 900` | `Passed` |
 | blargg instr_timing | `metalboy-testrom /path/to/instr_timing.gb --frames 1800` | `Passed` |
-| blargg mem_timing(01/02/03) | `metalboy-testrom /path/to/mem_timing/01.gb --frames 900` | `Passed` |
-| blargg halt_bug(参考・画面出力のみでシリアル判定不可) | `metalboy-testrom /path/to/halt_bug.gb --frames 1800` | `Passed` |
+| blargg mem_timing(01/02/03) | `metalboy-testrom /path/to/mem_timing/mem_timing.gb --frames 1800` | `Passed all tests` |
+| blargg mem_timing-2(参考) | シリアル出力なし。`$A000` プロトコルで判定(下記) | `Passed` |
+| blargg halt_bug | シリアル出力なし。画面で判定(下記) | 画面に `Passed` |
+
+- 入手元: `retrio/gb-test-roms`(検証時のローカルパス `/Users/bubio/dev/_Emu/Original/gb-test-roms`)
+- mem_timing-2 は結果を外部 RAM に書く: `$A001-$A003` = `DE B0 61` のとき
+  `$A000` が状態(`$80`=実行中、`$00`=合格)、`$A004` 以降が NUL 終端の結果テキスト
+- halt_bug は外部 RAM もなく画面出力のみ。600 フレーム後のフレームバッファに
+  `Passed` が表示され、参照画像(MenuetBoy `tests/ref/halt_bug.png`)と一致すること
+
+### 検証結果(2026-10-27)
+
+| ROM | 結果 |
+|-----|------|
+| mem_timing(統合・01/02/03 個別) | `Passed`(シリアル) |
+| mem_timing-2(統合・01/02/03 個別) | `Passed`(`$A000`) |
+| halt_bug | `Passed`(画面。HALT バグ実装後) |
 
 - 合格率は **100%**(SC-007 の基準)
 - blargg 系 ROM は各サブテストごとに独立した ROM を実行する

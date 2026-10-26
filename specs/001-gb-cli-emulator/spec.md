@@ -157,6 +157,11 @@
 - **FR-007**: エミュレーターは BIOS を必要とせず MUST エミュレーションを
   開始できる。BIOS を読み込む手段・BIOS 実行の挙動再現は提供して
   MUST NOT 存在する（起動時の必須初期化のみを行う）
+  - 例外: 開発用検証ツール（`metalboy-mooneye --bios`）に限り、ハードウェア
+    検証（Mooneye boot 系テスト）のために実 BIOS を供給できる。この経路は
+    エミュレーションコア（`MBGameBoy.bootROMData`）と当該ツールにのみ存在し、
+    製品経路（MetalBoy アプリ・`MBEmulatorSession`・`metalboy-testrom`）から
+    到達できてはならない（MUST NOT）
 - **FR-008**: キー割り当て MUST 次の通り固定である。キー割り当ての設定
   変更機能は MUST NOT 存在する
   - ↑↓←→（矢印キー） = 十字キー（D-Pad）

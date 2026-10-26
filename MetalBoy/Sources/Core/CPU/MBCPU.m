@@ -72,6 +72,7 @@ static inline uint16_t Add16NoZero(uint16_t a, uint16_t b, uint8_t *outFlags) {
 
 @implementation MBCPU {
     uint64_t _reportedOpcodes[4]; // 通知済み未定義オペコード(256 bit)
+    BOOL _haltBug; // HALT バグ: 次のフェッチで PC を進めない
 }
 
 - (instancetype)init {
@@ -121,7 +122,11 @@ static inline uint16_t Add16NoZero(uint16_t a, uint16_t b, uint8_t *outFlags) {
 // 内部遅延分のみ追加吐き出しする。
 static inline uint8_t CPUFetch8(MBCPU *self, id<MBCPUBus> bus) {
     uint8_t value = [bus cpuReadAddress:self->_pc];
-    self->_pc++;
+    if (self->_haltBug) {
+        self->_haltBug = NO;
+    } else {
+        self->_pc++;
+    }
     [self tickM:bus];
     return value;
 }
@@ -554,7 +559,16 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         case 0xF9: { _sp = Hl(self); cycleCount = 2; } break;
 
         // HALT / STOP
-        case 0x76: _halted = YES; cycleCount = 1; break;
+        case 0x76:
+            // HALT バグ(Pan Docs): IME=0 かつ (IF & IE) != 0 なら停止せず、
+            // 直後のバイトを PC を進めずに 2 回読む
+            if (!_ime && ([bus ifRegister] & [bus ieRegister] & 0x1F) != 0) {
+                _haltBug = YES;
+            } else {
+                _halted = YES;
+            }
+            cycleCount = 1;
+            break;
         case 0x10: _halted = YES; cycleCount = 1; break; // STOP → halt 相当(簡略)
 
         // LD r,r'($40-$7F・0x76 は上で処理済みのため削除)

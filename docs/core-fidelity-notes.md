@@ -639,3 +639,12 @@ per-dot OBJ フェッチパイプラインは不要だった。mode 3 開始時�
 
 **Mooneye 結果(修正 17 時点): 61 PASS / 12 FAIL / 2 TIMEOUT**(intr\_2\_mode0\_timing\_sprites +1、退行なし)。
 単体テスト 79/79。
+
+### 修正 18: HALT バグ(2026-10-27)
+
+- 症状: blargg halt_bug.gb が `Failed`。IE/IF 保留ありの行で `0411` になるべき値が `0C04`
+- 原因: IME=0 かつ `(IF & IE) != 0` で HALT を実行したとき、停止せずに直後のバイトを
+  PC を進めずに 2 回読む実機挙動(Pan Docs "HALT bug")が未実装
+- 修正: `MBCPU` の HALT で条件成立時は halt せず `_haltBug` を立て、次の `CPUFetch8` で
+  PC インクリメントを 1 回抑止。回帰テスト `testHaltBugReadsNextByteTwice`
+- 結果: halt_bug `Passed`、Mooneye 61/75 維持、cpu_instrs / instr_timing / mem_timing 維持

@@ -189,6 +189,23 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertEqual(cpu.registerA, 0x01, "電源投入初期値のまま(後続命令に進まない)");
 }
 
+/// HALT バグ(Pan Docs): IME=0 かつ (IF & IE) != 0 で HALT すると停止せず、
+/// 直後のバイトを PC を進めずに 2 回読む(blargg halt_bug.gb)
+- (void)testHaltBugReadsNextByteTwice {
+    MBCPU *cpu = [[MBCPU alloc] init];
+    MBTestBus *bus = [self makeBus];
+    // HALT / INC A / LD B,A
+    [bus loadProgram:@[@0x76, @0x3C, @0x47] atAddress:0x0100];
+    bus.ieRegisterValue = 0x04;
+    bus.busIfRegister = 0x04;        // IME=0 のまま保留中の要求あり
+    [cpu stepWithBus:bus];           // HALT(停止しない)
+    [cpu stepWithBus:bus];           // INC A(PC 据え置き)
+    [cpu stepWithBus:bus];           // INC A(再実行)
+    [cpu stepWithBus:bus];           // LD B,A
+    XCTAssertEqual(cpu.registerA, 0x03, "INC A が 2 回実行される(初期値 $01)");
+    XCTAssertEqual(cpu.registerB, 0x03);
+}
+
 // LDH (C),A / LDH A,(C): 実 ROM(Tetris 等)の OAM DMA スタブコピーが壊れていた回帰
 - (void)testLDHCWriteAndRead {
     MBCPU *cpu = [[MBCPU alloc] init];
