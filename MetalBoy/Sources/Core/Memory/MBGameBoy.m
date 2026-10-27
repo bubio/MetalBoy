@@ -4,6 +4,9 @@
 NS_ASSUME_NONNULL_BEGIN
 
 static const uint32_t kDotsPerFrame = 70224;
+/// BIOS なし起動時の DIV 内部カウンタと PPU ライン位相(Mooneye boot_div/boot_hwio-dmgABCmgb)
+static const uint16_t kPostBootDivCounter = 0xABCC;
+static const uint32_t kPostBootPPUDots = 0;
 
 @interface MBGameBoy () <MBCPUBus>
 @property (nonatomic, readwrite, strong) MBCPU *cpu;
@@ -28,6 +31,14 @@ static const uint32_t kDotsPerFrame = 70224;
         return nil;
     }
     _cartridge = cartridge;
+    [self buildComponentsPostBoot:YES];
+    return self;
+}
+
+/// CPU 以外も含む全コンポーネントを生成・配線する。postBoot=YES は BIOS なし起動
+/// ($0100 開始、DMG BIOS 終了時のレジスタ状態)、NO は実 BIOS 用の電源投入状態
+- (void)buildComponentsPostBoot:(BOOL)postBoot {
+    MBCartridge *cartridge = _cartridge;
     _cpu = [[MBCPU alloc] init];
     _ppu = [[MBPPU alloc] init];
     _apu = [[MBApu alloc] initWithDefaults];
@@ -38,7 +49,11 @@ static const uint32_t kDotsPerFrame = 70224;
     _memory.joypadTarget = _joypad;
     _memory.cartridgeTarget = cartridge;
     _memory.serialOutputHandler = self.serialOutputHandler;
-    return self;
+    if (postBoot) {
+        [_memory applyPostBootStateWithDivCounter:kPostBootDivCounter];
+        [_ppu applyPostBootStateAdvancingDots:kPostBootPPUDots];
+        [_apu applyPostBootState];
+    }
 }
 
 #pragma mark - 実 BIOS パス(デバッグ/検証用。仕様上アプリ側は BIOS 不要のまま)
@@ -48,6 +63,8 @@ static const uint32_t kDotsPerFrame = 70224;
     _bootROMData = bootROMData;
     self.bootROMVisible = (bootROMData.length > 0);
     if (bootROMData.length > 0) {
+        // 実 BIOS は電源投入状態から走らせる(BIOS なし用の終了時状態を捨てる)
+        [self buildComponentsPostBoot:NO];
         [self.cpu setPC:0x0000];
     }
 }

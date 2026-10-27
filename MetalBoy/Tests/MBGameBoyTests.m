@@ -46,9 +46,10 @@ NS_ASSUME_NONNULL_BEGIN
     for (NSInteger i = 0; i < 64; i++) {
         [machine runFrame];
     }
-    // 70224 dots × 64 frames = 4,494,336 dots → DIV 値は 4,494,336/256 = 17,556 進み
-    XCTAssertEqual((uint32_t)[(id<MBCPUBus>)machine cpuReadAddress:0xFF04], (uint32_t)(17556 & 0xFF),
-                   @"64 runFrame で DIV は 17556(mod 256=148)進むべき(4 倍速なら別の値になる)");
+    // 70224 dots × 64 frames = 4,494,336 dots。BIOS なし起動の DIV 内部初期値 $ABCC から
+    // (0xABCC + 4,494,336) / 256 = 17,727(mod 256 = 63)
+    XCTAssertEqual((uint32_t)[(id<MBCPUBus>)machine cpuReadAddress:0xFF04], (uint32_t)((0xABCC + 70224 * 64) / 256 & 0xFF),
+                   @"64 runFrame で DIV は 4,494,336 dots 分進むべき(4 倍速なら別の値になる)");
 }
 
 /// runFrame 1 回で APU が生成するサンプルは 48kHz 相当(~803.6 ペア)。
@@ -61,6 +62,53 @@ NS_ASSUME_NONNULL_BEGIN
     // 70224 dots / (4194304/48000) ≒ 803.4 emit × 2ch。誤差は tick 起点の丸め分を許容
     XCTAssertTrue(int16Count >= 1600 && int16Count <= 1616,
                   @"1 フレーム分の APU 出力は ~1606 int16(実測 %lu)", (unsigned long)int16Count);
+}
+
+/// BIOS なし起動は DMG BIOS 終了時($0100)の I/O 状態から始まる
+/// (Mooneye boot_hwio-dmgABCmgb / boot_div-dmgABCmgb)
+- (void)testPostBootIOState {
+    MBGameBoy *machine = [self makeMachine];
+    id<MBCPUBus> bus = (id<MBCPUBus>)machine;
+    XCTAssertEqual([bus cpuReadAddress:0xFF04], 0xAB, "DIV");
+    XCTAssertEqual([bus cpuReadAddress:0xFF0F], 0xE1, "IF: VBlank 要求が残る");
+    XCTAssertEqual([bus cpuReadAddress:0xFF12], 0xF3, "NR12");
+    XCTAssertEqual([bus cpuReadAddress:0xFF14], 0xBF, "NR14: length enable 以外は読めない");
+    XCTAssertEqual([bus cpuReadAddress:0xFF16], 0x3F, "NR21: ch2 は BIOS 未使用");
+    XCTAssertEqual([bus cpuReadAddress:0xFF26], 0xF1, "NR52: ch1 有効");
+    XCTAssertEqual([bus cpuReadAddress:0xFF47], 0xFC, "BGP");
+}
+
+/// 内部クロックのシリアル転送は DIV 内部カウンタ bit8 の立下り(512 dots)毎に 1 bit、
+/// 8 bit で IF bit3 を立てる(Mooneye serial/boot_sclk_align-dmgABCmgb)
+- (void)testSerialInternalClockTakesEightBitPeriods {
+    MBGameBoy *machine = [self makeMachine];
+    id<MBCPUBus> bus = (id<MBCPUBus>)machine;
+    [bus cpuWrite:0x00 address:0xFF04]; // DIV 内部カウンタ = 0
+    [bus cpuWrite:0x00 address:0xFF0F];
+    [bus cpuWrite:0x81 address:0xFF02];
+    for (NSInteger i = 0; i < 8 * 128 - 1; i++) [bus cpuTickCycle];
+    XCTAssertEqual([bus cpuReadAddress:0xFF0F] & 0x08, 0, "8 bit 未満では割込みなし");
+    XCTAssertEqual([bus cpuReadAddress:0xFF02] & 0x80, 0x80, "転送中");
+    [bus cpuTickCycle];
+    XCTAssertEqual([bus cpuReadAddress:0xFF0F] & 0x08, 0x08, "8 bit 目で割込み");
+    XCTAssertEqual([bus cpuReadAddress:0xFF02] & 0x80, 0, "転送完了");
+    XCTAssertEqual([bus cpuReadAddress:0xFF01], 0xFF, "接続相手なし → $FF を受信");
+}
+
+/// 転送完了を待たずに次の SB を書いても、外部出力は CPU が書いた値になる
+/// (Mooneye quit の serial_send_byte は DMG の 8 bit 転送より短いタイムアウトで次へ進む)
+- (void)testSerialOutputUsesWrittenValueDuringActiveTransfer {
+    MBGameBoy *machine = [self makeMachine];
+    id<MBCPUBus> bus = (id<MBCPUBus>)machine;
+    NSMutableArray<NSNumber *> *sent = [NSMutableArray array];
+    machine.serialOutputHandler = ^(uint8_t byte) { [sent addObject:@(byte)]; };
+    [bus cpuWrite:0x00 address:0xFF04];
+    [bus cpuWrite:0x03 address:0xFF01];
+    [bus cpuWrite:0x81 address:0xFF02];
+    [bus cpuWrite:0x05 address:0xFF01];
+    for (NSInteger i = 0; i < 128; i++) [bus cpuTickCycle]; // SB が 1 bit シフトされる
+    [bus cpuWrite:0x81 address:0xFF02];
+    XCTAssertEqualObjects(sent, (@[@0x03, @0x05]));
 }
 
 /* 旧実装(4 倍速バグ): 1 runFrame が 70224 M-cycle 分 CPU を回していた。

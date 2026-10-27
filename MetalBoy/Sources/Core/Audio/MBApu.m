@@ -200,6 +200,19 @@ static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *
     return [self initWithDefaults];
 }
 
+- (void)applyPostBootState {
+    // DMG BIOS のチャイム後: ch1 は有効のまま音量 0 まで減衰済み(NR52=$F1, NR11=$80, NR12=$F3)
+    _s.square2[0].duty = 2;
+    _s.square2[0].envelope.initialVolume = 0x0F;
+    _s.square2[0].envelope.envIncrease = NO;
+    _s.square2[0].envelope.envPeriod = 3;
+    _s.square2[0].envelope.volume = 0;
+    _s.square2[0].dacEnabled = YES;
+    _s.square2[0].enabled = YES;
+    // ch2 は BIOS 未使用 → 電源投入値(NR21=$3F)
+    _s.square2[1].duty = 0;
+}
+
 - (NSMutableData *)pendingSamples {
     return _s.pendingSamples;
 }
@@ -410,17 +423,18 @@ static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *
             return (uint8_t)((_s.square2[0].envelope.initialVolume << 4)
                              | (_s.square2[0].envelope.envIncrease ? 0x08 : 0)
                              | _s.square2[0].envelope.envPeriod);
-        case 0xFF14: return (uint8_t)((_s.square2[0].freqRaw >> 8) & 0x07);
+        // NRx4: 周波数・トリガは書込み専用。読めるのは length enable(bit6)のみ(Pan Docs)
+        case 0xFF14: return (uint8_t)(0xBF | (_s.square2[0].lengthEnabled ? 0x40 : 0));
         case 0xFF16: return (uint8_t)((_s.square2[1].duty << 6) | 0x3F);
         case 0xFF17:
             return (uint8_t)((_s.square2[1].envelope.initialVolume << 4)
                              | (_s.square2[1].envelope.envIncrease ? 0x08 : 0)
                              | _s.square2[1].envelope.envPeriod);
         case 0xFF18: return 0xFF; // NR23 は書込み専用(実機: 読み 0xFF)
-        case 0xFF19: return (uint8_t)((_s.square2[1].freqRaw >> 8) & 0x07);
+        case 0xFF19: return (uint8_t)(0xBF | (_s.square2[1].lengthEnabled ? 0x40 : 0));
         case 0xFF1A: return (uint8_t)(_s.wave.dacEnabled ? 0xFF : 0x7F);
         case 0xFF1C: return (uint8_t)((_s.wave.volumeCode << 5) | 0x9F);
-        case 0xFF1E: return 0x80;
+        case 0xFF1E: return (uint8_t)(0xBF | (_s.wave.lengthEnabled ? 0x40 : 0));
         case 0xFF21:
             return (uint8_t)((_s.noise.envelope.initialVolume << 4)
                              | (_s.noise.envelope.envIncrease ? 0x08 : 0)

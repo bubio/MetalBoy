@@ -85,6 +85,23 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertEqual(oam.oamBytes[0], 0x7A, "次の tick で byte0 が載る");
 }
 
+/// DMG: ソース $E000-$FFFF は WRAM へミラーされる($FE00→$DE00, $FF00→$DF00。
+/// Mooneye oam_dma/sources-GS)
+- (void)testDMASourceAboveE000MirrorsWRAM {
+    MBMemoryMap *map = [[MBMemoryMap alloc] init];
+    MBFakeOAM *oam = [[MBFakeOAM alloc] init];
+    map.ppuTarget = oam;
+    map.oamTarget = oam;
+    [map write8:0x3C address:0xDE00];
+    [map write8:0x9D address:0xDF9F];
+    [map write8:0xFE address:0xFF46];
+    for (int i = 0; i < 2 + 0xA0; i++) [map tickCycle];
+    XCTAssertEqual(oam.oamBytes[0], 0x3C, "$FE00 は $DE00 を読む");
+    [map write8:0xFF address:0xFF46];
+    for (int i = 0; i < 2 + 0xA0; i++) [map tickCycle];
+    XCTAssertEqual(oam.oamBytes[0x9F], 0x9D, "$FF9F は $DF9F を読む");
+}
+
 @end
 
 NS_ASSUME_NONNULL_END

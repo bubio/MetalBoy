@@ -92,6 +92,16 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     return self;
 }
 
+- (void)applyPostBootStateAdvancingDots:(uint32_t)dots {
+    _bgp = 0xFC;
+    uint8_t ignored = 0;
+    while (dots >= 4) {
+        [self tickDots:4 ifRequest:&ignored];
+        dots -= 4;
+    }
+    _completedFrameCount = 0;
+}
+
 #pragma mark - VRAM / OAM
 
 - (uint8_t)readVRAM:(uint16_t)address {

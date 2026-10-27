@@ -175,6 +175,7 @@ static int64_t MonotonicNow(void) {
         memset(_ram.mutableBytes, 0xFF, _ramSize);
     }
     _ramEnabled = NO;
+    _romBankLow = 1; // 電源投入時は bank 1(MBC5 は 0 も選択可能なため明示が必要)
     _rtcHalt = YES;
     _rtcLastTick = MonotonicNow();
     memset(rtcRegisters, 0, sizeof(rtcRegisters));

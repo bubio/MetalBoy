@@ -40,6 +40,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 割り込み要求は ifFlags に OR される callback パス。
 /// 返り値: YES = 1 フレーム完了(呼び出し側はフレーム提示 möglich)
 - (BOOL)tickDots:(uint32_t)dots ifRequest:(uint8_t *)ifRequest;
+/// BIOS なし起動用: DMG BIOS 終了時($0100)の状態にする。BGP=$FC、
+/// ライン位相は電源投入(LCD ON)から dots 進めた位置
+- (void)applyPostBootStateAdvancingDots:(uint32_t)dots;
 
 /// VBlank 期間判定(バンクからの DMA などで使用)
 - (BOOL)inVBlank;

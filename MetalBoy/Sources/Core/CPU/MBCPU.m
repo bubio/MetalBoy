@@ -636,7 +636,12 @@ static inline BOOL CondPass(MBCPU *self, NSUInteger cond) {
         } break;
 
         // DI / EI
-        case 0xF3: _ime = NO; cycleCount = 1; break;
+        case 0xF3:
+            // EI 直後の DI は遅延中の IME 有効化も取り消す(rapid_di_ei)
+            _ime = NO;
+            _imeApplyAfterInstruction = NO;
+            cycleCount = 1;
+            break;
         case 0xFB: _imeDelayed = YES; cycleCount = 1; break;
 
         // LD (a16),SP / LD A,(a16)

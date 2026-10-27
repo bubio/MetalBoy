@@ -648,3 +648,15 @@ per-dot OBJ フェッチパイプラインは不要だった。mode 3 開始時�
 - 修正: `MBCPU` の HALT で条件成立時は halt せず `_haltBug` を立て、次の `CPUFetch8` で
   PC インクリメントを 1 回抑止。回帰テスト `testHaltBugReadsNextByteTwice`
 - 結果: halt_bug `Passed`、Mooneye 61/75 維持、cpu_instrs / instr_timing / mem_timing 維持
+
+### 修正 19: Mooneye 61 → 66/75(2026-10-27)
+
+| テスト | 原因 | 修正 |
+|--------|------|------|
+| rapid\_di\_ei | EI 直後の DI が遅延中の IME 有効化を取り消さない | DI で `_imeApplyAfterInstruction` もクリア |
+| oam\_dma/sources-GS | MBC5 の電源投入時 ROM バンクが 0(`$4000` 実行で RST 38 ループ)。DMA ソース `$E000-$FFFF` を WRAM へミラーしていない | `_romBankLow = 1` で初期化。`dmaRawRead` で `$E000` 以上を WRAM ミラー |
+| boot\_div / boot\_hwio-dmgABCmgb | BIOS なし起動が BIOS 終了時の I/O 状態になっていない。NRx4 の読み出しマスク誤り | 各コンポーネントに post-boot 状態(IF=$E1・DIV 内部 $ABCC・BGP=$FC・ch1 有効/音量 0)。NRx4 は `$BF \| length enable` |
+| serial/boot\_sclk\_align-dmgABCmgb | シリアル転送が即時完了・割込みなし | 内部クロック時は DIV 内部カウンタ bit8 の立下り毎に 1 bit、8 bit で IF bit3。外部出力は CPU が SB に書いた値(Mooneye quit は転送完了前に次の SB を書くため)。ランナー判定を末尾 6 バイトに変更 |
+
+- 実 BIOS 供給時(`--bios`)は `buildComponentsPostBoot:NO` で電源投入状態から作り直す
+- 残り 9 本は全て DMG 以外のモデル(dmg0 / S / mgb / sgb / sgb2)向け。本機の対象(DMG ABC)では FAIL が正しい

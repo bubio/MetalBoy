@@ -27,6 +27,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 電源投入の初期化(NR52=0xF1, NR51=0xF3)
 - (instancetype)initWithDefaults;
+/// BIOS なし起動用: DMG BIOS 終了時($0100)の APU 状態にする(Mooneye boot_hwio-dmgABCmgb)
+- (void)applyPostBootState;
 
 @end
 

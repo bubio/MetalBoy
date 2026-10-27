@@ -73,11 +73,14 @@ int main(int argc, const char *argv[]) {
             if (serialLength < 6) {
                 continue;
             }
-            if (memcmp(serial, passBytes, 6) == 0) {
+            // 結果は末尾 6 バイトで判定する(テスト自身がシリアル転送する ROM は
+            // 先頭に別のバイトが入る。serial/boot_sclk_align)
+            const uint8_t *tail = serial + serialLength - 6;
+            if (memcmp(tail, passBytes, 6) == 0) {
                 printf("PASS %s\n", romPath);
                 return 0;
             }
-            if (memcmp(serial, failBytes, 6) == 0) {
+            if (memcmp(tail, failBytes, 6) == 0) {
                 printf("FAIL %s\n", romPath);
                 PrintBytes("serial", serial, serialLength);
                 return 1;

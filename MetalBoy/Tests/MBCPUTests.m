@@ -189,6 +189,19 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertEqual(cpu.registerA, 0x01, "電源投入初期値のまま(後続命令に進まない)");
 }
 
+/// EI 直後の DI は IME の遅延有効化を取り消す(Mooneye rapid_di_ei)
+- (void)testDIRightAfterEICancelsIME {
+    MBCPU *cpu = [[MBCPU alloc] init];
+    MBTestBus *bus = [self makeBus];
+    // EI / DI / NOP
+    [bus loadProgram:@[@0xFB, @0xF3, @0x00] atAddress:0x0100];
+    [cpu stepWithBus:bus];
+    [cpu stepWithBus:bus];
+    XCTAssertFalse(cpu.ime, "EI の直後に DI すれば IME は 1 にならない");
+    [cpu stepWithBus:bus];
+    XCTAssertFalse(cpu.ime);
+}
+
 /// HALT バグ(Pan Docs): IME=0 かつ (IF & IE) != 0 で HALT すると停止せず、
 /// 直後のバイトを PC を進めずに 2 回読む(blargg halt_bug.gb)
 - (void)testHaltBugReadsNextByteTwice {

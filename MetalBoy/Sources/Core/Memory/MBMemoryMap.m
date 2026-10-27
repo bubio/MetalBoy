@@ -28,6 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL timaReloadPending;  // TIMA$FF オーバーフロー:M 中(立下り tick〜リロード tick)
 @property (nonatomic) BOOL timaReloadGuard;    // リロード M 中: TIMA 書込み廃棄・TMA 書込みは TIMA へ即反映
 @property (nonatomic) uint8_t serialData;      // $FF01 SB
+@property (nonatomic) uint8_t serialWrittenData; // CPU が最後に SB へ書いた値(外部出力用)
 @property (nonatomic) BOOL serialTransferStart; // $FF02 bit7
 @property (nonatomic) int32_t serialTransferCounter;
 @property (nonatomic) uint8_t latchedSCBits;   // $FF02 bit1(clock source)簡易
@@ -81,6 +82,11 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
+
+- (void)applyPostBootStateWithDivCounter:(uint16_t)divCounter {
+    _ifRegister = 0x01; // BIOS 中の VBlank 要求が残る(IF=$E1)
+    _divCounter = divCounter;
+}
 
 #pragma mark - read/write
 
@@ -207,17 +213,17 @@ NS_ASSUME_NONNULL_BEGIN
             break;
         case 0xFF01:
             _serialData = value;
+            _serialWrittenData = value;
             break;
         case 0xFF02: {
             _latchedSCBits = (uint8_t)(value & 0x03);
             _serialTransferStart = (value & 0x80) != 0;
             if (_serialTransferStart) {
-                _serialTransferCounter = 0;
-                // 遅延なしの簡略: すぐ外部に出力する
-                if (self.serialOutputHandler) self.serialOutputHandler(_serialData);
-                // 実機相当: 外部機器なしで送出した場合は $FF が受信される(Pan Docs)
-                _serialData = 0xFF;
-                _serialTransferStart = NO;
+                // 送出バイトは開始時点で外部(テスト ROM 判定)へ渡す。転送完了を待たずに
+                // 次の SB を書く ROM(Mooneye quit)でもシフト途中の値ではなく書込み値を出す。
+                // 内部クロック時のみ 8 bit 後に完了する(外部クロックは相手がいないので完了しない)
+                _serialTransferCounter = 8;
+                if (self.serialOutputHandler) self.serialOutputHandler(_serialWrittenData);
             }
             break;
         }
@@ -316,8 +322,12 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
-/// DMA 自身のソース読み出しは OAM 衝突ゲートを通らない(bus_read_raw 相当)
+/// DMA 自身のソース読み出しは OAM 衝突ゲートを通らない(bus_read_raw 相当)。
+/// DMG では $E000-$FFFF は WRAM のミラー($FE00→$DE00。Mooneye oam_dma/sources-GS)
 - (uint8_t)dmaRawRead:(uint16_t)address {
+    if (address >= 0xE000) {
+        return ((uint8_t *)self.wram.bytes)[address & 0x1FFF];
+    }
     BOOL saved = _dmaActive;
     _dmaActive = NO;
     uint8_t value = [self read8:address];
@@ -343,13 +353,16 @@ NS_ASSUME_NONNULL_BEGIN
     if ((_tac & 0x04) && ((prev & [self tacDotsMask]) != 0) && ((_divCounter & [self tacDotsMask]) == 0)) {
         [self timerFallingEdge];
     }
-    if (_serialTransferStart) {
-        // 8 bits at 512 bit/s → 簡約: 1 M-cycle で完了
-        if (self.serialOutputHandler) {
-            self.serialOutputHandler(_serialData);
+    // 内部クロックのシリアル: DIV 内部カウンタ bit8 の立下り(512 dots)毎に 1 bit シフト。
+    // 接続相手なしなので 1 が入り、8 bit 後に SB=$FF・IF bit3(serial/boot_sclk_align)
+    if (_serialTransferStart && (_latchedSCBits & 0x01)
+        && (prev & 0x100) != 0 && (_divCounter & 0x100) == 0) {
+        _serialData = (uint8_t)((_serialData << 1) | 0x01);
+        _serialTransferCounter -= 1;
+        if (_serialTransferCounter <= 0) {
+            _serialTransferStart = NO;
+            _ifRegister |= 0x08;
         }
-        _serialTransferStart = NO;
-        _ifRegister |= 0x08; // serial interrupt
     }
     [self dmaTickOneMCycle];
 }

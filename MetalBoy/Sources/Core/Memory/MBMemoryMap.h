@@ -17,6 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)tickCycle;
 
 /// IF レジスタ(割り込み要求ビット)。IO から設定もなされる
+/// BIOS なし起動用: DMG BIOS 終了時($0100)の IF と DIV 内部カウンタにする
+- (void)applyPostBootStateWithDivCounter:(uint16_t)divCounter;
 @property (nonatomic, readwrite) uint8_t ifRegister;
 @property (nonatomic, readwrite) uint8_t ieRegister;
 

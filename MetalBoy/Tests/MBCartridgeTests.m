@@ -76,6 +76,21 @@ static NSData *MakeROM1(void) {
     XCTAssertEqual([cart romByteAtAddress:0x4000], (uint8_t)0x00); // bank 2 % 2 = 0 → bank 0
 }
 
+/// MBC5 の電源投入時 ROM バンクは 1(Mooneye oam_dma/sources-GS が $4000 を実行)
+- (void)testMBC5InitialBankIsOne {
+    uint8_t rom[0x8000];
+    for (NSUInteger i = 0; i < sizeof(rom); i++) {
+        rom[i] = (uint8_t)((i / 0x4000) * 0x10);
+    }
+    rom[0x0147] = 0x1B; // MBC5 + RAM + battery
+    rom[0x0149] = 0x02;
+    NSError *error = nil;
+    MBCartridge *cart = [[MBCartridge alloc] initWithROMData:[NSData dataWithBytes:rom length:sizeof(rom)] error:&error];
+    XCTAssertEqual([cart romByteAtAddress:0x4000], (uint8_t)0x10, "初期状態で bank 1");
+    [cart writeControlByte:0x00 atAddress:0x2000];
+    XCTAssertEqual([cart romByteAtAddress:0x4000], (uint8_t)0x00, "MBC5 は bank 0 も選択できる");
+}
+
 - (void)testSRAMAccess {
     NSError *error = nil;
     MBCartridge *cart = [[MBCartridge alloc] initWithROMData:MakeROM1() error:&error];
