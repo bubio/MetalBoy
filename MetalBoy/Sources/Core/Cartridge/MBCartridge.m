@@ -118,33 +118,37 @@ static int64_t MonotonicNow(void) {
 
 #pragma mark - init
 
+/// エラー通知用ヘルパー。ブロックで out-parameter を捕捉すると use-after-free の
+/// 危険があるため、out-parameter をそのまま受け取る関数で行う
+static void MBCartridgeSetError(NSError *_Nullable *_Nullable error,
+                                NSInteger code,
+                                NSString *message) {
+    if (error) {
+        *error = [NSError errorWithDomain:MBCartridgeErrorDomain
+                                     code:code
+                                 userInfo:@{NSLocalizedFailureReasonErrorKey: message ?: @""}];
+    }
+}
+
 - (nullable instancetype)initWithROMData:(NSData *)romData error:(NSError *_Nullable *_Nullable)error {
     self = [super init];
     if (!self) return nil;
 
-    void (^fail)(NSInteger, NSString *) = ^(NSInteger code, NSString *message) {
-        if (error) {
-            *error = [NSError errorWithDomain:MBCartridgeErrorDomain
-                                         code:code
-                                     userInfo:@{NSLocalizedFailureReasonErrorKey: message ?: @""}];
-        }
-    };
-
     if (romData.length < 0x0150) {
-        fail(MBCartridgeErrorCodeROMTooShort, @"ROM が小さすぎます(ヘッダ読取不可)");
+        MBCartridgeSetError(error, MBCartridgeErrorCodeROMTooShort, @"ROM が小さすぎます(ヘッダ読取不可)");
         return nil;
     }
     const uint8_t *b = (const uint8_t *)romData.bytes;
     uint8_t typeByte = b[0x0147];
 
     if (!IsSupportedCartridgeType(typeByte)) {
-        fail(MBCartridgeErrorCodeUnsupportedType,
-             [NSString stringWithFormat:@"対応していないカートリッジタイプ: 0x%02X(MBC0/1/2/3/5 のみ)", typeByte]);
+        MBCartridgeSetError(error, MBCartridgeErrorCodeUnsupportedType,
+                            [NSString stringWithFormat:@"対応していないカートリッジタイプ: 0x%02X(MBC0/1/2/3/5 のみ)", typeByte]);
         return nil;
     }
     if (b[0x0143] == 0xC0) {
-        fail(MBCartridgeErrorCodeCgbOnlyROM,
-             @"Game Boy Color 専用 ROM は非対応です(対応ハード: DMG のみ)");
+        MBCartridgeSetError(error, MBCartridgeErrorCodeCgbOnlyROM,
+                            @"Game Boy Color 専用 ROM は非対応です(対応ハード: DMG のみ)");
         return nil;
     }
 

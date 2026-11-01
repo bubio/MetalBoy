@@ -144,13 +144,6 @@ static inline void ApplyLengthAndTrigger(uint16_t *lengthCounter,
     }
 }
 
-static inline void DisableIfDacOff(MBEnvelope *env, BOOL *channelEnabled, BOOL *dacOn) {
-    if (!*dacOn) {
-        *channelEnabled = NO;
-    }
-    (void)env;
-}
-
 #pragma mark - MBApu
 
 @interface MBApu () {

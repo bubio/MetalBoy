@@ -27,6 +27,21 @@ static const double kFramesPerSecond = 59.7275;
 @property (nonatomic) BOOL runStarted;
 @end
 
+/// MBButton → MBJoypad のビットマスク写像(範囲外は 0)
+static uint32_t MBJoypadButtonMaskFromButton(MBButton button) {
+    switch (button) {
+        case MBButtonUp:     return MBJoypadButtonUp;
+        case MBButtonDown:   return MBJoypadButtonDown;
+        case MBButtonLeft:   return MBJoypadButtonLeft;
+        case MBButtonRight:  return MBJoypadButtonRight;
+        case MBButtonA:      return MBJoypadButtonA;
+        case MBButtonB:      return MBJoypadButtonB;
+        case MBButtonStart:  return MBJoypadButtonStart;
+        case MBButtonSelect: return MBJoypadButtonSelect;
+        default:             return 0;
+    }
+}
+
 @implementation MBEmulatorSession
 
 - (nullable instancetype)initWithOptions:(MBLaunchOptions *)options
@@ -219,25 +234,7 @@ static const double kFramesPerSecond = 59.7275;
     return YES;
 }
 
-@end
-
 #pragma mark - MBInputPort実装(ボタン → Joypad 写像)
-
-static uint32_t MBJoypadButtonMaskFromButton(MBButton button) {
-    switch (button) {
-        case MBButtonUp:     return MBJoypadButtonUp;
-        case MBButtonDown:   return MBJoypadButtonDown;
-        case MBButtonLeft:   return MBJoypadButtonLeft;
-        case MBButtonRight:  return MBJoypadButtonRight;
-        case MBButtonA:      return MBJoypadButtonA;
-        case MBButtonB:      return MBJoypadButtonB;
-        case MBButtonStart:  return MBJoypadButtonStart;
-        case MBButtonSelect: return MBJoypadButtonSelect;
-        default:             return 0;
-    }
-}
-
-@implementation MBEmulatorSession (InputPort)
 
 - (void)setButton:(MBButton)button pressed:(BOOL)pressed {
     uint32_t mask = MBJoypadButtonMaskFromButton(button);

@@ -1,12 +1,13 @@
 #import <AVFAudio/AVFAudio.h>
 #import <Foundation/Foundation.h>
+#import "MBPorts.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
 /// 音声出力( AVAudioEngine + AVAudioSourceNode )。コアから供給された
 /// ステレオ int16 の PCM をキューから消費し、出力フォーマット(float32)へ変換します。
 /// 音量は mainMixerNode.outputVolume に 0〜100% を写像して適用(research R-3)。
-@interface MBAudioEngine : NSObject
+@interface MBAudioEngine : NSObject <MBAudioOutPort>
 
 - (instancetype)initWithVolumePercent:(NSUInteger)volumePercent;
 

@@ -5,7 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 static const NSUInteger kOutputSampleRate = 48000;
 
-@interface MBAudioEngine () <MBAudioOutPort>
+@interface MBAudioEngine ()
 @property (nonatomic, strong) AVAudioEngine *engine;
 @property (nonatomic, strong) AVAudioSourceNode *sourceNode;
 @property (nonatomic, strong) AVAudioFormat *format;
