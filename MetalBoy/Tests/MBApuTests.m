@@ -96,6 +96,130 @@ NS_ASSUME_NONNULL_BEGIN
     [apu writeRegister:0x00 address:0xFF12]; // DAC off(0 純用)
     XCTAssertFalse(apu.nr52Value & 0x01, "DAC off で ch1 停止");
 }
+
+#pragma mark - ミキサー / ノイズ区間平均(BubiBoyLite apu.odin 準拠)
+static int32_t MBPeakAbs(const int16_t *samples, NSUInteger frames, NSUInteger channel) {
+    int32_t peak = 0;
+    for (NSUInteger i = 0; i < frames; i++) {
+        int32_t v = samples[i * 2 + channel];
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+    }
+    return peak;
+}
+
+/// NR51 パンニング: ch1 を左のみに割り当てると右チャンネルは完全無音(実機のステレオ)
+- (void)testNR51PansChannelToLeftOnly {
+    MBApu *apu = [[MBApu alloc] initWithDefaults];
+    [apu writeRegister:0xC0 address:0xFF11]; // duty=3
+    [apu writeRegister:0xF0 address:0xFF12]; // volume=15(エンベロープ無し)
+    [apu writeRegister:0x10 address:0xFF25]; // ch1 → 左のみ
+    [apu writeRegister:0x80 address:0xFF14]; // trigger
+    [apu tickDots:8192];
+
+    NSUInteger frames = apu.pendingSampleCount / 2;
+    XCTAssertGreaterThan(frames, (NSUInteger)0);
+    const int16_t *samples = (const int16_t *)apu.pendingSamples.bytes;
+    XCTAssertGreaterThan(MBPeakAbs(samples, frames, 0), 1000, "左は鳴る");
+    XCTAssertEqual(MBPeakAbs(samples, frames, 1), 0, "右は無音");
+}
+
+/// NR50 マスター音量: 右音量 7(最大)と 0(1/8)で振幅が 8 倍異なる
+- (void)testNR50MasterVolumeScalesOutput {
+    int32_t peakFull = 0;
+    int32_t peakLow = 0;
+    for (NSInteger pass = 0; pass < 2; pass++) {
+        MBApu *apu = [[MBApu alloc] initWithDefaults];
+        [apu writeRegister:0xC0 address:0xFF11];
+        [apu writeRegister:0xF0 address:0xFF12];
+        [apu writeRegister:0x01 address:0xFF25];           // ch1 → 右のみ
+        [apu writeRegister:(pass == 0 ? 0x77 : 0x00) address:0xFF24]; // NR50
+        [apu writeRegister:0x80 address:0xFF14];
+        [apu tickDots:8192];
+        const int16_t *samples = (const int16_t *)apu.pendingSamples.bytes;
+        int32_t peak = MBPeakAbs(samples, apu.pendingSampleCount / 2, 1);
+        if (pass == 0) peakFull = peak; else peakLow = peak;
+    }
+    XCTAssertGreaterThan(peakFull, 1000);
+    XCTAssertEqualWithAccuracy((double)peakFull / (double)peakLow, 8.0, 0.1,
+                               "NR50 音量 7 vs 0 は 8 倍");
+}
+
+/// ch3 の 50% 出力は「4bit を右シフト」した値(2*shifted-15)。
+/// wave RAM 全 0xFF(ニブル 15)なら 50% は 7 → 出力は -1/15 で負に振れる。
+- (void)testWaveVolumeUsesHardwareShift {
+    MBApu *apu = [[MBApu alloc] initWithDefaults];
+    for (uint16_t addr = 0xFF30; addr <= 0xFF3F; addr++) {
+        [apu writeRegister:0xFF address:addr];
+    }
+    [apu writeRegister:0x80 address:0xFF1A]; // DAC on
+    [apu writeRegister:0x40 address:0xFF1C]; // 50%
+    [apu writeRegister:0x04 address:0xFF25]; // ch3 → 右のみ(bit3=ch4 なので 0x04 が正)
+    [apu writeRegister:0x80 address:0xFF1E]; // trigger(freq 0)
+    [apu tickDots:8192];
+
+    NSUInteger frames = apu.pendingSampleCount / 2;
+    const int16_t *samples = (const int16_t *)apu.pendingSamples.bytes;
+    XCTAssertGreaterThan(frames, (NSUInteger)0);
+    for (NSUInteger i = 0; i < frames; i++) {
+        XCTAssertLessThanOrEqual(samples[i * 2 + 1], 0, "50% の 15 は -1/15");
+    }
+    XCTAssertLessThan(MBPeakAbs(samples, frames, 1), 1000, "振幅は 1/15 相当");
+}
+
+/// ノイズは 1 サンプル区間の区間平均(ボックスフィルタ)で出力する。
+/// 最高周波数(divisor=8, shift=0)を点サンプルすると RMS はフルスケール(≈8192)に
+/// なるが、区間平均では大幅に小さくなる(エイリアシング抑制)。
+- (void)testNoiseHighFrequencyIsBandLimited {
+    MBApu *apu = [[MBApu alloc] initWithDefaults];
+    [apu writeRegister:0xF0 address:0xFF21]; // 音量 15・エンベロープ無し
+    [apu writeRegister:0x00 address:0xFF22]; // divisor=8, shift=0(最高周波数)
+    [apu writeRegister:0x08 address:0xFF25]; // ch4 → 右のみ
+    [apu writeRegister:0x80 address:0xFF23]; // trigger
+    [apu tickDots:8192];
+
+    NSUInteger frames = apu.pendingSampleCount / 2;
+    const int16_t *samples = (const int16_t *)apu.pendingSamples.bytes;
+    XCTAssertGreaterThan(frames, (NSUInteger)0);
+    double sumSq = 0.0;
+    for (NSUInteger i = 0; i < frames; i++) {
+        double v = (double)samples[i * 2 + 1];
+        sumSq += v * v;
+    }
+    double rms = sqrt(sumSq / (double)frames);
+    XCTAssertGreaterThan(rms, 300.0, "ノイズが鳴っている");
+    XCTAssertLessThan(rms, 6000.0, "区間平均で点サンプルより小さくなる");
+}
+
+/// ノイズ DAC off(NR42=0)でチャンネルが停止する
+- (void)testNoiseDACOffDisablesChannel {
+    MBApu *apu = [[MBApu alloc] initWithDefaults];
+    [apu writeRegister:0xF0 address:0xFF21];
+    [apu writeRegister:0x80 address:0xFF23];
+    XCTAssertTrue(apu.nr52Value & 0x08, "ノイズ ch 有効");
+    [apu writeRegister:0x00 address:0xFF21];
+    XCTAssertFalse(apu.nr52Value & 0x08, "DAC off で停止");
+}
+
+/// 電源 off/on は length カウンタを保持するが length enable は 0 に戻る
+/// (dmg_sound 01-registers test 5 / 08-len ctr during power / Pan Docs)。
+- (void)testPowerOffPreservesLengthButClearsEnable {
+    MBApu *apu = [[MBApu alloc] initWithDefaults];
+    [apu writeRegister:0x3E address:0xFF16]; // NR21: length = 2
+    [apu writeRegister:0x40 address:0xFF19]; // length enable(トリガーなし)
+    XCTAssertEqual([apu readRegister:0xFF19] & 0x40, 0x40);
+
+    [apu writeRegister:0x00 address:0xFF26]; // 電源 off
+    [apu writeRegister:0x80 address:0xFF26]; // 電源 on
+    XCTAssertEqual([apu readRegister:0xFF19] & 0x40, 0x00, "length enable は消える");
+
+    // 保持された length(2)で trigger + length enable する(64 にリロードされない)
+    [apu writeRegister:0xF0 address:0xFF17];
+    [apu writeRegister:0xC0 address:0xFF19];
+    XCTAssertTrue(apu.nr52Value & 0x02, "trigger で ch2 有効");
+    [apu tickDots:(uint32_t)(6 * 8192)]; // length clock 3 回分
+    XCTAssertFalse(apu.nr52Value & 0x02, "保持されていた length(2)で停止する");
+}
 @end
 
 NS_ASSUME_NONNULL_END

@@ -42,6 +42,8 @@ metalboy-testrom /path/to/<suite>.gb --json   # → {"passed":true,"serial":"...
 
 | ROM | 結果 |
 |-----|------|
+| cpu_instrs(01〜11 個別) | `Passed`(シリアル。**11/11**。修正 15 で 9/11 → 11/11) |
+| instr_timing | `Passed`(シリアル。修正 18〜19 時点で維持) |
 | mem_timing(統合・01/02/03 個別) | `Passed`(シリアル) |
 | mem_timing-2(統合・01/02/03 個別) | `Passed`(`$A000`) |
 | halt_bug | `Passed`(画面。HALT バグ実装後) |

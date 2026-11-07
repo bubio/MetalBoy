@@ -159,7 +159,7 @@ static uint32_t MBJoypadButtonMaskFromButton(MBButton button) {
         [self.renderPort presentFramebuffer:pixels];
     }
 
-    // 音声(research R-3: コア内はモノラル複製 int16 ×2)
+    // 音声(research R-3: コアは NR51 パンニング済みのステレオ int16 L/R)
     if (self.audioOutPort != nil) {
         NSMutableData *samples = [self.machine.apu takePendingSamples];
         if (samples.length >= 4) {

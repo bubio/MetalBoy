@@ -660,3 +660,33 @@ per-dot OBJ フェッチパイプラインは不要だった。mode 3 開始時�
 
 - 実 BIOS 供給時(`--bios`)は `buildComponentsPostBoot:NO` で電源投入状態から作り直す
 - 残り 9 本は全て DMG 以外のモデル(dmg0 / S / mgb / sgb / sgb2)向け。本機の対象(DMG ABC)では FAIL が正しい
+
+### 修正 20: APU ミキサー/ノイズの実機乖離(2026-11-01)
+
+ユーザ報告「音が違う。とくにノイズチャンネルがかなり違う」への対応。参照実装
+`~/dev/_Emu/BubiBoyLite/src/core/apu.odin` と比較して原因を特定した。
+
+| 不具合 | 症状 | 対応 |
+|---|---|---|
+| NR51 パンニング / NR50 マスター音量を無視して全 ch をモノラル加算 | 定位・音量バランスが実機と違う。ノイズが常に両耳 | NR51 の L/R 振り分け + NR50(0-7 → (n+1)/8)を実装し、コア出力をステレオに |
+| wave/noise をサンプル瞬間の点サンプルで出力 | 高周波ノイズがエイリアシングで耳障り・音量も過大 | 前回サンプル〜今回の全 T-cycle の出力を平均(ボックスフィルタ)。wave はナイキスト超え時のみ 1 周期平均へフォールバック |
+| NR32 の音量を `(2n-15)*k/15` でスケール | 50%/25% の振幅・中心が実機とずれる | 実機どおり 4bit を右シフト(50% = `n>>1`, 25% = `n>>2`)して `2*shifted-15` |
+
+- サンプル採取を `4194304/48000` の整数アキュムレータへ変更(正確な 48kHz)。
+- APU 電源 off 中も無音サンプルを一定レートで生成(再生側のペーシング維持)。
+- 電源 off で NR レジスタ/ch 状態をクリア(wave RAM と length カウンタは保持)、
+  電源 off 中の書込みは NR41(noise length)と wave RAM のみ許可。
+- DIV($FF04)書込み時、旧内部カウンタ bit12=1 ならフレームシーケンサを 1 step 余分に進める
+  (`notifyDivWriteWithOldValue:` を `MBMemoryMap` から呼ぶ)。
+- 回帰テスト: `testNR51PansChannelToLeftOnly` / `testNR50MasterVolumeScalesOutput` /
+  `testWaveVolumeUsesHardwareShift` / `testNoiseHighFrequencyIsBandLimited` /
+  `testNoiseDACOffDisablesChannel` / `testPowerOffPreservesLengthButClearsEnable`。
+- 併せて Pan Docs に合わせて以下を修正: length カウンタはチャンネル無効中でも length enable なら
+  減算する / 電源 off では length カウンタを保持し length enable は 0 に戻す / 電源 off 中の
+  書込みは NR41(noise length)と wave RAM のみ許可。
+- blargg `dmg_sound` 単体(ローカル `/Users/bubio/dev/_Emu/Original/gb-test-roms/dmg_sound/rom_singles`、
+  $A000 を診断テストで読取り)では 01-registers / 02-len ctr / 03-trigger /
+  06-overflow on trigger / 07-len sweep period sync / 11-regs after power が pass。
+  残りは 04/05(sweep 詳細)・08(len ctr during power)・09/10/12(DMG の wave RAM アクセス窓)で、
+  今回のノイズ/ミキサー修正とは独立した既知の残課題。
+- 実 ROM での聴感確認は 2026-11-07 に実施し、問題なかった(音の違和感は解消)。

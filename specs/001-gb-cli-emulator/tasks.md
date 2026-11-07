@@ -241,3 +241,7 @@ Task: "Tests/Core/MBPPUTests.m"
 - [X] T043 メインメニュー(`installMainMenu`)を削除し、Cmd+Q による終了は `MetalBoy/Sources/UI/App/MBAppDelegate.m` のキーモニタで `[NSApp terminate:]` を呼ぶ方式に置き換える per FR-002 (contradicts)
 - [X] T044 BIOS 読込み経路(`MBGameBoy.bootROMData`・`metalboy-mooneye --bios`)を製品経路(MetalBoy アプリ・MBEmulatorSession)から到達不能であることを確認し、開発ツール限定の例外として spec 側での扱いをレビュー・判断する per FR-007 (contradicts)
 - [X] T045 blargg mem_timing(01/02/03)と halt_bug を `metalboy-testrom` で実行し、合格を `MetalBoy/Tests/TEST-ROMS.md` に記録する per SC-007 (partial)
+
+## Phase 8: Convergence
+
+- [X] T046 SC-007 の「検証結果」表に blargg cpu_instrs(11/11)と instr_timing の合格記録を `MetalBoy/Tests/TEST-ROMS.md` に追記し、選定スイート全件の合格記録を同ファイルに揃える per SC-007 (partial)

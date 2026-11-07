@@ -231,6 +231,7 @@ NS_ASSUME_NONNULL_BEGIN
             // 書込みは内部カウンタの 0 化。選択ビットが立っていた場合は
             // 1→0 遷移(=立下りエッジ)が書込み時点で発生する(Mooneye *_div_trigger)。
             // オーバーフロー待ちがある場合は DIV リセットでキャンセルされる。
+            if (apu != nil) [apu notifyDivWriteWithOldValue:_divCounter];
             if ([self timerClockHigh]) [self timerFallingEdge];
             _divCounter = 0;
             _timaReloadPending = NO;
