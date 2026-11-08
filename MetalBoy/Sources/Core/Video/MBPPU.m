@@ -51,6 +51,13 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     uint32_t _dotsSinceInc;
     /// line0(死相)窓が有効(lcdon_timing-GS OAM: line0 の窓は mode3 開始から)
     BOOL _bootWindow;
+    /// ウィンドウ内部ラインカウンタ(dmg-acid2 の落とし穴: LY 代用禁止)。
+    /// LY>=WY かつ WX により ≥1 画素描画したライン数だけ進める(参照 BubiBoyLite ppu.odin)。
+    /// リセット点: 初期化 / LCD OFF→ON(LCDC bit7 立ち上げ) / LY フレームラップ。
+    uint16_t _windowLine;
+    /// 現ラインの BG/ウィンドウ パレット適用前カラーナンバー(0-3)。
+    /// DMG の OBJ 優先判定(attr bit7)は BGP 適用後の「色」ではなくこの生値と比較する。
+    uint8_t _bgColorIndex[160];
 }
 @property (nonatomic, readwrite, strong) NSMutableData *framebuffer;
 @property (nonatomic, readwrite) NSUInteger completedFrameCount;
@@ -88,6 +95,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _coincBlanked = NO;
         _statIrqLine = NO;
         _coincidenceLatch = NO;
+        _windowLine = 0;
     }
     return self;
 }
@@ -182,6 +190,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
         _lcdBootDots = 80;
         _dotsSinceInc = 0;
         _bootWindow = YES;
+        _windowLine = 0; // LCD ON 時はライン先頭から再開(ウィンドウ内部カウンタも 0 に)
     }
     _lcdc = value;
 }
@@ -305,6 +314,7 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
                     if (_ly == 153) {
                         _ly = 0;
                         _mode = MBPPUModeOAMScan;
+                        _windowLine = 0; // フレームラップで内部カウンタも 0 に
                     } else {
                         _ly++;
                     }
@@ -387,6 +397,10 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     BOOL bgMap9C00 = (self.lcdc & 0x08) != 0;
     BOOL winMap9C00 = (self.lcdc & 0x40) != 0;
 
+    // ウィンドウはこのラインで ≥1 画素描画するか(LY>=WY かつ WX が画面内に届く)。
+    // 実際に描画したラインだけ window_line を進める(dmg-acid2 の落とし穴)。
+    BOOL winVisibleThisLine = winOn && y >= self.wy && ((int)self.wx - 7) < 160;
+
     uint8_t paletteColors[4];
     for (NSInteger i = 0; i < 4; i++) {
         paletteColors[i] = (uint8_t)((self.bgp >> (i * 2)) & 0x03);
@@ -396,42 +410,77 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     for (uint8_t x = 0; x < 160; x++) {
         if (!bgOn) {
             row[x] = kColorRGBA[0];                    // DMG: BG OFF 時は白固定
+            _bgColorIndex[x] = 0;                      // BG 不透明扱いしない(BG OFF で OBJ 常時表)
             continue;
         }
-        BOOL useWindow = winOn && y >= self.wy && (x + 7) >= self.wx;
+        BOOL useWindow = winVisibleThisLine && (x + 7) >= self.wx;
         uint16_t mapBase = useWindow ? (winMap9C00 ? 0x1C00 : 0x1800) : (bgMap9C00 ? 0x1C00 : 0x1800);
         uint8_t xx = useWindow ? (uint8_t)(x - (self.wx - 7)) : (uint8_t)(x + self.scx);
-        uint8_t yy = useWindow ? (uint8_t)(y - self.wy) : (uint8_t)(y + self.scy);
+        // ウィンドウの行は内部カウンタ _windowLine で数える(LY からは算出しない)
+        uint8_t yy = useWindow ? (uint8_t)(_windowLine & 0xFF) : (uint8_t)(y + self.scy);
         uint16_t mapIndex = mapBase + (uint16_t)((yy / 8) * 32 + (xx / 8));
         uint8_t tileIndex = vram[mapIndex];
         uint8_t colorIndex = [self tileColorIndex:vram tileIndex:tileIndex fx:(uint8_t)(xx & 7) fy:(uint8_t)(yy & 7) tileData8000:tileData8000];
+        _bgColorIndex[x] = colorIndex;                 // パレット適用前の値を保存(window 画素も BG 扱い)
         row[x] = kColorRGBA[paletteColors[colorIndex]];
     }
 
-    // スプライト: OAM 順(line あたり最大 10 体・Y/X 判定で通過者み描画 OAM 優先)
+    if (winVisibleThisLine) {
+        _windowLine++;
+    }
+
+    // スプライト: ライン上のスプライト(OAM 順・最大 10 体)を DMG 優先度に並べ替えて描画
+    // (実機/Pan Docs "OBJ priority" + 参照 BubiBoyLite ppu.odin):
+    //   スプライト間優先 = X 座標が小さいほど優先・同 X は OAM 順。
+    //   一度描いた(=非透明と確定した)画素は低優先度スプライトで上書きされない。
+    //   attr bit7(BG 優先)= BGP 適用「前」の BG 生カラーナンバー != 0 を条件に隠れる。
     if (self.lcdc & 0x02) {
         BOOL tall = (self.lcdc & 0x04) != 0;
         uint8_t height = tall ? 16 : 8;
-        for (NSInteger drawn = 0, si = 0; si < 40 && drawn < 10; si++) {
+
+        // ライン上スプライトの収集(OAM 順・最大 10 体)
+        uint8_t sortedX[10], sortedIdx[10];
+        NSInteger count = 0;
+        for (NSInteger si = 0; si < 40 && count < 10; si++) {
             uint8_t sy = oam[si * 4];
-            uint8_t sx = oam[si * 4 + 1];
             int32_t screenY = (int32_t)sy - 16;
             if ((int32_t)y < screenY || (int32_t)y >= screenY + height) continue;
-            drawn++;
-            int32_t screenX = (int32_t)sx - 8;
-            int32_t lineTop = screenY;
-            if (lineTop < 0) lineTop = 0;
+            sortedX[count] = oam[si * 4 + 1];
+            sortedIdx[count] = (uint8_t)si;
+            count++;
+        }
+        // 挿入ソート: (X,OAM インデックス) 昇順 = DMG 描画優先度順(最大 10 体なので十分)
+        for (NSInteger i = 1; i < count; i++) {
+            uint8_t cx = sortedX[i], ci = sortedIdx[i];
+            NSInteger j = i - 1;
+            while (j >= 0 && (sortedX[j] > cx || (sortedX[j] == cx && sortedIdx[j] > ci))) {
+                sortedX[j + 1] = sortedX[j];
+                sortedIdx[j + 1] = sortedIdx[j];
+                j--;
+            }
+            sortedX[j + 1] = cx;
+            sortedIdx[j + 1] = ci;
+        }
+
+        BOOL pixelOwned[160] = { NO };
+        for (NSInteger i = 0; i < count; i++) {
+            NSInteger si = sortedIdx[i];
+            uint8_t attr = oam[si * 4 + 3];
+            int32_t screenY = (int32_t)oam[si * 4] - 16;
+            int32_t screenX = (int32_t)sortedX[i] - 8;
             for (int32_t px = MAX(0, screenX); px < MIN(160, screenX + 8); px++) {
                 uint8_t fx = (uint8_t)(px - screenX);
                 uint8_t fy = (uint8_t)(y - screenY);
-                if (oam[si * 4 + 3] & 0x40) fy = (uint8_t)(height - 1 - fy); // 縦フリップ
-                if (oam[si * 4 + 3] & 0x20) fx = (uint8_t)(7 - fx);          // 横フリップ
+                if (attr & 0x40) fy = (uint8_t)(height - 1 - fy); // 縦フリップ
+                if (attr & 0x20) fx = (uint8_t)(7 - fx);          // 横フリップ
                 uint16_t tileAddr = oam[si * 4 + 2];
                 if (tall) tileAddr = (uint16_t)(tileAddr & 0xFE);
                 uint8_t raw = [self tileColorIndex:vram tileIndex:(uint8_t)tileAddr fx:fx fy:fy tileData8000:YES];
-                if (raw == 0) continue;                                   // 透過
-                if (oam[si * 4 + 3] & 0x80 && (row[px] != kColorRGBA[0])) continue; // BG 優先
-                uint8_t palette = (oam[si * 4 + 3] & 0x10) ? self.obp1 : self.obp0;
+                if (raw == 0) continue;                           // 透過: 画素の所有権も取らない
+                if (pixelOwned[px]) continue;                     // 高優先度スプライトが確定済み
+                pixelOwned[px] = YES;                             // スプライト間優先度を確定(BG 優先判定とは独立)
+                if (attr & 0x80 && _bgColorIndex[px] != 0) continue; // BG 生インデックス 1-3 の上には描かない
+                uint8_t palette = (attr & 0x10) ? self.obp1 : self.obp0;
                 row[px] = kColorRGBA[(palette >> (raw * 2)) & 0x03];
             }
         }

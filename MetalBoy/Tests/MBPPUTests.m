@@ -310,6 +310,173 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertLessThanOrEqual(flipDots, 468, "LY 増分は死相 80 + mode3 172 + mode0 204 ≈ 452");
 }
 
+/// 全フレームを 154*456 dots 駆動して完成させる
+- (void)runOneFrame:(MBPPU *)ppu {
+    uint8_t ifRequest = 0;
+    [ppu tickDots:154 * 456 ifRequest:&ifRequest];
+}
+
+/// 指定 line・指定モード(bit1-0)に 1 dot 刻みで到達する
+- (void)tickToLine:(MBPPU *)ppu line:(uint8_t)line mode:(uint8_t)mode {
+    uint8_t ifRequest = 0;
+    while (!(ppu.ly == line && (ppu.statValue & 0x03) == mode)) {
+        [ppu tickDots:1 ifRequest:&ifRequest];
+    }
+}
+
+// DMG 4 階調(kColorRGBA: 0=白 1=淡灰 2=濃灰 3=黒)
+static const uint32_t kShade0 = 0xFFFFFFFF, kShade1 = 0xFFB0B0B0, kShade2 = 0xFF606060, kShade3 = 0xFF000000;
+
+/// 全ピクセルが colorIndex idx の 8x8 タイルを $8000 + tile*16 へ書込む
+- (void)writeFlatTile:(MBPPU *)ppu tile:(uint8_t)tile index:(uint8_t)idx {
+    // hi<<1|lo = idx: lo = idx & 1 を全列、hi = idx >> 1 を全列
+    uint8_t lo = (uint8_t)((idx & 0x01) ? 0xFF : 0x00);
+    uint8_t hi = (uint8_t)((idx >> 1) ? 0xFF : 0x00);
+    for (NSInteger i = 0; i < 8; i++) {
+        [ppu writeVRAM:lo address:(uint16_t)(tile * 16 + i * 2)];
+        [ppu writeVRAM:hi address:(uint16_t)(tile * 16 + i * 2 + 1)];
+    }
+}
+
+/// OAM エントリを書込む
+- (void)writeOAMSprite:(MBPPU *)ppu slot:(uint8_t)slot y:(uint8_t)y x:(uint8_t)x tile:(uint8_t)tile attr:(uint8_t)attr {
+    uint16_t base = (uint16_t)(slot * 4);
+    [ppu writeOAM:y address:base];
+    [ppu writeOAM:x address:(uint16_t)(base + 1)];
+    [ppu writeOAM:tile address:(uint16_t)(base + 2)];
+    [ppu writeOAM:attr address:(uint16_t)(base + 3)];
+}
+
+/// DMG スプライト間優先度(実機/Pan Docs "OBJ priority in DMG mode"):
+/// X 座標が小さいほど優先・同 X は OAM 順。一度描いたピクセルは
+/// 優先度の低いスプライトで上書きされない。OAM の並び順は優先度と無関係。
+- (void)testSpritePrioritySmallerXWinsEvenWhenEarlierInOAM {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x93;          // LCD+BG+OBJ・$8000 unsigned・8x8
+    ppu.obp0 = 0xE4;          // OAM[1] 側: index2 → shade2
+    ppu.obp1 = 0xFF;          // OAM[0] 側(attr bit4=1): index3 → shade3
+    [self writeFlatTile:ppu tile:1 index:3]; // $8010: 黒
+    [self writeFlatTile:ppu tile:2 index:2]; // $8020: 濃灰
+    // OAM[0]: X=16(先書き・X が小さい) / OAM[1]: X=20(後書き・X が大きい)
+    [self writeOAMSprite:ppu slot:0 y:16 x:16 tile:1 attr:0x10];
+    [self writeOAMSprite:ppu slot:1 y:16 x:20 tile:2 attr:0x00];
+
+    [self runOneFrame:ppu];
+    uint32_t *row0 = (uint32_t *)ppu.framebuffer.mutableBytes;
+    // 重複区間 px12-15 は X の小さい OAM[0](黒)が勝つ(OAM[1] が上書きしてはならない)
+    XCTAssertEqual(row0[12], kShade3, "px12: 重複区間は X 小の OAM[0] 勝");
+    XCTAssertEqual(row0[15], kShade3, "px15");
+    XCTAssertEqual(row0[16], kShade2, "px16: OAM[1] 独自領域");
+    XCTAssertEqual(row0[19], kShade2, "px19");
+    XCTAssertEqual(row0[7], kShade0, "px7: スプライト外は BG 白");
+}
+
+/// 同一 X 座標のスプライトは OAM インデックスが小さい方が勝つ(実機)
+- (void)testSpriteTieSameXLowerOAMIndexWins {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x93;
+    ppu.obp0 = 0xE4;
+    ppu.obp1 = 0xFF;
+    [self writeFlatTile:ppu tile:1 index:3]; // 黒
+    [self writeFlatTile:ppu tile:2 index:2]; // 濃灰
+    // 同 X=16: OAM[0](黒・obp1)が OAM[1](濃灰・obp0)に勝つ
+    [self writeOAMSprite:ppu slot:0 y:16 x:16 tile:1 attr:0x10];
+    [self writeOAMSprite:ppu slot:1 y:16 x:16 tile:2 attr:0x00];
+
+    [self runOneFrame:ppu];
+    uint32_t *row0 = (uint32_t *)ppu.framebuffer.mutableBytes;
+    XCTAssertEqual(row0[9], kShade3, "同 X は OAM インデックス小が勝つ");
+    XCTAssertEqual(row0[14], kShade3);
+}
+
+/// DMG の OBJ 背後 BG 判定(attr bit7)は BGP 適用「前」の BG カラーナンバー:
+/// インデックス 1-3 の上にはスプライトを描かない。BGP で該当色が白(シェード0)に
+/// マッピングされていても隠れる(実機/Pan Docs)。
+- (void)testObjBehindBGComparesPrePaletteBGColorIndex {
+    // BG タイル 0 = 全ピクセル index1・BGP = 0xF3(index1 → シェード0 = 白)
+    MBPPU *hidden = [[MBPPU alloc] init];
+    hidden.lcdc = 0x93;
+    hidden.bgp = 0xF3;
+    hidden.obp0 = 0xE4;
+    [self writeFlatTile:hidden tile:0 index:1];
+    [self writeFlatTile:hidden tile:1 index:3];
+    [self writeOAMSprite:hidden slot:0 y:16 x:16 tile:1 attr:0x80]; // bit7 = BG 優先
+    [self runOneFrame:hidden];
+    uint32_t *rowH = (uint32_t *)hidden.framebuffer.mutableBytes;
+    XCTAssertEqual(rowH[10], kShade0, "bit7 + BG index1(白にマップ済み)でも隠れる");
+
+    // bit7 無し: 同じ BG の上に表示される
+    MBPPU *shown = [[MBPPU alloc] init];
+    shown.lcdc = 0x93;
+    shown.bgp = 0xF3;
+    shown.obp0 = 0xE4;
+    [self writeFlatTile:shown tile:0 index:1];
+    [self writeFlatTile:shown tile:1 index:3];
+    [self writeOAMSprite:shown slot:0 y:16 x:16 tile:1 attr:0x00];
+    [self runOneFrame:shown];
+    uint32_t *rowS = (uint32_t *)shown.framebuffer.mutableBytes;
+    XCTAssertEqual(rowS[10], kShade3, "bit7 無しは BG 上に表示");
+}
+
+/// BG カラーナンバー 0 の上には attr bit7 があってもスプライトが表示される。
+/// 逆に index0 を黒にマップする BGP(BGP=0x03)でもスプライトは表示される
+/// (post-BGP の白/黒比較では判定できない = 現行実装のバグ)。
+- (void)testObjBeatsBGColorIndexZeroEvenIfMappedToBlack {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0x93;
+    ppu.bgp = 0x03;           // index0 → シェード3(黒): BG タイル 0 は既定ゼロ
+    ppu.obp0 = 0x40;          // スプライト index3 → シェード1(淡灰)
+    [self writeFlatTile:ppu tile:1 index:3];
+    // attr bit7 ありでも BG index0 なら描かれる
+    [self writeOAMSprite:ppu slot:0 y:16 x:16 tile:1 attr:0x80];
+
+    [self runOneFrame:ppu];
+    uint32_t *row0 = (uint32_t *)ppu.framebuffer.mutableBytes;
+    XCTAssertEqual(row0[10], kShade1, "BG index0 の上は bit7 無関係に表示される");
+}
+
+/// ウィンドウ内部ラインカウンタ(dmg-acid2 の落とし穴): ウィンドウの行は LY ではなく、
+/// 実際に ≥1 ピクセル描画したライン数で数える。WX=200(非表示)で 10 ライン経過後に
+/// WX=7 にした場合、そのラインのウィンドウ行は 0 でなければならない。
+/// 行区別はタイル 1 の行ごとの色で行う(行0=index1 / 行1=index2 / 行2=index3)。
+- (void)testWindowInternalLineCounterRow0AfterLateWx {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    ppu.lcdc = 0xF1; // LCD+BG+ウィンドウ($9C00)+unsigned(BG マップは $9800 と分離)
+    ppu.wy = 0;
+    ppu.wx = 200;    // 最初の 10 ラインはウィンドウ非表示
+    ppu.bgp = 0xE4;
+    // ウィンドウマップ全行 → タイル 1(BG はタイル 0 = 白のまま)
+    for (NSInteger e = 0; e < 32; e++) {
+        [ppu writeVRAM:1 address:(uint16_t)(0x1C00 + e)];
+    }
+    // タイル 1: 各走査行に異なる色(行0=index1・行1=index2・行2=index3・行3+は index0)
+    uint8_t rowIdx[8] = {1, 2, 3, 0, 0, 0, 0, 0};
+    for (NSInteger r = 0; r < 8; r++) {
+        uint8_t lo = (rowIdx[r] & 0x01) ? 0xFF : 0x00;
+        uint8_t hi = (rowIdx[r] >> 1) ? 0xFF : 0x00;
+        [ppu writeVRAM:lo address:(uint16_t)(16 + r * 2)];
+        [ppu writeVRAM:hi address:(uint16_t)(16 + r * 2 + 1)];
+    }
+
+    // line 0-9: WX=200 → ウィンドウ画素なし(この間 window_line は進まない)
+    [self tickToLine:ppu line:10 mode:0x02];
+    XCTAssertEqual(((uint32_t *)ppu.framebuffer.mutableBytes)[5 * 160], kShade0, "非表示中は BG 白のまま");
+    ppu.wx = 7; // line10 の描画でウィンドウ行 0
+
+    [self tickToLine:ppu line:11 mode:0x02]; // line10 表示済み
+    uint32_t *row10 = (uint32_t *)ppu.framebuffer.mutableBytes + 10 * 160;
+    XCTAssertEqual(row10[0], kShade1, "line10 = ウィンドウ行 0(index1)");
+
+    // line12 で再び WX=200(描画画素なし → window_line 不進)→ line13 で WX=7
+    [self tickToLine:ppu line:12 mode:0x02];
+    ppu.wx = 200;
+    [self tickToLine:ppu line:13 mode:0x02];
+    ppu.wx = 7;
+    [self tickToLine:ppu line:13 mode:0x00]; // line13 描画済み
+    uint32_t *row13 = (uint32_t *)ppu.framebuffer.mutableBytes + 13 * 160;
+    XCTAssertEqual(row13[0], kShade3, "非表示ラインを飛ばしてウィンドウ行 2(index3)");
+}
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -690,3 +690,29 @@ per-dot OBJ フェッチパイプラインは不要だった。mode 3 開始時�
   残りは 04/05(sweep 詳細)・08(len ctr during power)・09/10/12(DMG の wave RAM アクセス窓)で、
   今回のノイズ/ミキサー修正とは独立した既知の残課題。
 - 実 ROM での聴感確認は 2026-11-07 に実施し、問題なかった(音の違和感は解消)。
+
+### 修正 21: スプライト間優先度 / OBJ 背後 BG 判定 / ウィンドウ内部ラインカウンタ(2026-11-08)
+
+ユーザ報告「Street Fighter II(J) で飛び道具(ソニックブーム)が表示されない」への対応。
+ヘッドレスハーネス(TMPDIR/mbdump.m・プロダクト非含)で実 ROM を駆動し、OAM には
+ブームスプライト(Slot3/4, X=$68, T16/T18, attr=$60/bit7+OBP1)が存在するのに
+フレームバッファに描画されないことを確認。参照実装 `~/dev/_Emu/BubiBoyLite/src/core/ppu.odin`
+(lines 569-704)と SameBoy(GB_MODEL_DMG_B)のフレームダンプを突き合わせて原因を特定
+(Pan Docs "OBJ priority in DMG mode" / "OAM attributes" も参照):
+
+| 不具合 | 症状 | 対応 |
+|--------|------|------|
+| スプライト間優先度が「OAM の後続が常に上書き」(実装逆) | 重なり 2 体(T16/T18 のペア)で OAM 後方のスプライトだけ有効になり描画が壊れる。エフェクト系は OAM 順と画面 X が独立なので致命的 | ライン上スプライト(最大 10 体)を収集後、X 昇順・同 X は OAM 順に挿入ソートして描画。`pixelOwned[160]` で一度確定した画素は低優先度スプライトで上書きしない(透過画素は所有権を取らない) |
+| OBJ 背後 BG 判定(attr bit7)が「BGP 適用後の色が白かどうか」の比較 | BGP で該当色を白にマップしているゲーム(ブームは BG 生インデックス 1-3 の上を bit7 で隠す運用)で判定が正/負とも反転する | ラインごとに BG/ウィンドウ画素のパレット適用「前」の生カラーナンバーを `_bgColorIndex[160]` に記録し、bit7 はそこと比較する(LCDC bit0=0 時は 0 埋めで OBJ 常時表出) |
+| ウィンドウ内部ラインカウンタ不在(LY 代用) | WX を画面外から画面内へ差し込む演出で、ウィンドウの行が LY 連動で進む(dmg-acid2 の落とし穴) | `_windowLine` ivar を追加。LY>=WY・WX により ≥1 画素描画したラインだけ +1。リセット点 = 初期化 / LCD OFF→ON / LY フレームラップ(BubiBoyLite `ppu.odin` ppu_enable / ppu_tick の ly ラップと対応) |
+
+- 回帰テスト(`MBPPUTests.m` 6 件追加: 先に失敗を確認後に実装):
+  `testSpritePrioritySmallerXWinsEvenWhenEarlierInOAM` / `testSpriteTieSameXLowerOAMIndexWins` /
+  `testObjBehindBGComparesPrePaletteBGColorIndex` / `testObjBeatsBGColorIndexZeroEvenIfMappedToBlack` /
+  `testWindowInternalLineCounterRow0AfterLateWx`
+- 実 ROM 検証: 同一入力スケジュールでの SFII Guile 戦(f≈14094/14098)でソニックブームが
+  Guile の手元に描画されることを BMP 撮像で確認(修正前同フレームは OAM のみでバッファ未描画)
+- Mooneye: ローカル 51 本(acceptance+emulator-only, BubiBoyLite 付属)で修正前後 diff = なし
+  (45 PASS / 6 FAIL は既知の MBC emulator-only 群)※ 75 本フルスイートは当時未入手のため
+  51 本集合での同一性で退行なしを担保。dmg-acid2 のフレームバッファは修正前後で一致
+  (黒画面のままで未解決 = 別の既知課題として残す)
