@@ -22,7 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readwrite) uint8_t ifRegister;
 @property (nonatomic, readwrite) uint8_t ieRegister;
 
-/// DMA 転送($FF46)で OAM への書込みをここに通知(PPU へのブリッジ)
+/// DMA 転送($FF46)で OAM への書込みをここに通知(PPU へのブリッジ。
+/// 転送は dmaWriteOAM:address: を使用・CPU 書込み抑制とは別経路)
 @property (nonatomic, nullable, strong) id oamTarget; // MBPPU(writeOAM:address:)レスポンダ
 /// Serial 出力の収集先(NSTextBlock 階層に縛らず block で)
 @property (nonatomic, nullable, copy) void (^serialOutputHandler)(uint8_t byte);

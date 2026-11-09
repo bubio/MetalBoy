@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
 #import "MBMemoryMap.h"
+#import "MBPPU.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -13,6 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (uint8_t *)oamBytes { return _oam; }
 - (uint8_t)readOAM:(uint16_t)address { return _oam[address & 0xFF]; }
 - (void)writeOAM:(uint8_t)value address:(uint16_t)address {
+    _oam[address & 0xFF] = value;
+}
+- (void)dmaWriteOAM:(uint8_t)value address:(uint16_t)address {
     _oam[address & 0xFF] = value;
 }
 @end
@@ -100,6 +104,83 @@ NS_ASSUME_NONNULL_BEGIN
     [map write8:0xFF address:0xFF46];
     for (int i = 0; i < 2 + 0xA0; i++) [map tickCycle];
     XCTAssertEqual(oam.oamBytes[0x9F], 0x9D, "$FF9F は $DF9F を読む");
+}
+
+/// DMA 転送中の PPU モードで DMA の OAM 書込みが抑制されてはならない。
+/// Pan Docs "OAM DMA": 転送は表示モードに依存しない(BubiBoyLite bus.odin も
+/// bus.oam[] 直書きで CPU 書込み抑制とは別経路)。実 ROM(SFII)は走査線途中に
+/// OAM DMA を掛け、mode2/3 中のバイトが欠落するとスプライトが消える。
+/// 回帰: DMA 経路が OAM 書込み禁止窓(mode3・mode2 前半)を通ると転送が欠落する。
+- (void)testDMATransfersAllBytesAcrossPPUModes {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    MBMemoryMap *map = [[MBMemoryMap alloc] init];
+    map.ppuTarget = ppu;
+    map.oamTarget = ppu;
+    ppu.lcdc = 0x93; // LCD ON + BG/OBJ 有効
+    // ソース $C000-$C09F に既知パターン
+    for (int i = 0; i < 0xA0; i++) {
+        [map write8:(uint8_t)(0x10 + i) address:(uint16_t)(0xC000 + i)];
+    }
+    // 実機構成(MBGameBoy.cpuTickCycle)と同じ合成 tick: メモリ(DMA)1 M-cycle +
+    // PPU 4 dots。ブート窓(line0 死相)を越え通常ラインの mode2 へ
+    uint8_t req = 0;
+    int guard = 0;
+    while ((ppu.ly == 0 || (ppu.statValue & 0x03) != 2) && guard++ < 40000) {
+        [ppu tickDots:4 ifRequest:&req];
+    }
+    XCTAssertTrue(guard < 40000, "mode2 に到達できた");
+    // DMA 開始($FF46 = 0xC0)→ 完了まで合成 tick(delay 2 + 0xA0 バイト)
+    [map write8:0xC0 address:0xFF46];
+    for (int i = 0; i < 2 + 0xA0; i++) {
+        [map tickCycle];
+        [ppu tickDots:4 ifRequest:&req];
+    }
+    // 160 M-cycle は複数ラインに跨り mode2/3(書込み禁止窓)も通過する。
+    // 全 160 バイトが OAM に載っていなければならない(読出し拒否窓回避のため
+    // VBlank まで進めてから検査)
+    guard = 0;
+    while ((ppu.statValue & 0x03) != 1 && guard++ < 40000) {
+        [ppu tickDots:4 ifRequest:&req];
+    }
+    XCTAssertTrue((ppu.statValue & 0x03) == 1, "VBlank に到達した");
+    for (int i = 0; i < 0xA0; i++) {
+        XCTAssertEqual([ppu readOAM:(uint16_t)i], (uint8_t)(0x10 + i),
+            "byte%03d: mode2/3 中の DMA 書込みが抑制された", i);
+    }
+}
+
+/// DMA 自身のソース読み出しは書込み窓の影響を受けないことの姉妹確認:
+/// mode3(描画中)に DMA を開始しても転送数は欠落しない
+- (void)testDMADuringMode3KeepsAllBytes {
+    MBPPU *ppu = [[MBPPU alloc] init];
+    MBMemoryMap *map = [[MBMemoryMap alloc] init];
+    map.ppuTarget = ppu;
+    map.oamTarget = ppu;
+    ppu.lcdc = 0x93;
+    for (int i = 0; i < 0xA0; i++) {
+        [map write8:(uint8_t)(0x30 + i) address:(uint16_t)(0xC000 + i)];
+    }
+    uint8_t req = 0;
+    int guard = 0;
+    // 通常ラインの mode3(=0x03)まで進める
+    while ((ppu.ly == 0 || (ppu.statValue & 0x03) != 3) && guard++ < 40000) {
+        [ppu tickDots:4 ifRequest:&req];
+    }
+    XCTAssertTrue((ppu.statValue & 0x03) == 3, "mode3 に到達できた");
+    [map write8:0xC0 address:0xFF46];
+    for (int i = 0; i < 2 + 0xA0; i++) {
+        [map tickCycle];
+        [ppu tickDots:4 ifRequest:&req];
+    }
+    guard = 0;
+    while ((ppu.statValue & 0x03) != 1 && guard++ < 40000) {
+        [ppu tickDots:4 ifRequest:&req];
+    }
+    XCTAssertTrue((ppu.statValue & 0x03) == 1, "VBlank に到達した");
+    for (int i = 0; i < 0xA0; i++) {
+        XCTAssertEqual([ppu readOAM:(uint16_t)i], (uint8_t)(0x30 + i),
+            "byte%03d: mode3 中の DMA 書込みが抑制された", i);
+    }
 }
 
 @end

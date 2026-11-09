@@ -315,7 +315,11 @@ NS_ASSUME_NONNULL_BEGIN
     if (_dmaActive) {
         uint16_t src = (uint16_t)(_dmaSource + _dmaIndex);
         uint8_t value = [self dmaRawRead:src];
-        [self.ppuTarget writeOAM:value address:(uint16_t)_dmaIndex];
+        // DMA は表示モードに依存しない(Pan Docs "OAM DMA")。CPU 書込み用の
+        // OAM 禁止窓(mode2 前半/ mode3)を通さず dmaWriteOAM で直接 OAM に載せる。
+        // writeOAM 経由だと mode2/3 中のバイトが捨てられ、実 ROM(SFII)の
+        // 走査線途中 DMA スイープでスプライトが消えていた(dmaWriteOAM 参照)
+        [self.ppuTarget dmaWriteOAM:value address:(uint16_t)_dmaIndex];
         _dmaIndex += 1;
         if (_dmaIndex >= 0xA0) {
             _dmaActive = NO;

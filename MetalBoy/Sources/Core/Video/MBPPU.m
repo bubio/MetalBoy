@@ -181,6 +181,15 @@ static const uint32_t kColorRGBA[4] = { 0xFFFFFFFF, 0xFFB0B0B0, 0xFF606060, 0xFF
     ((uint8_t *)_oam.mutableBytes)[address] = value;
 }
 
+/// OAM DMA 専用書込み: 転送は表示モードに依存しない(Pan Docs "OAM DMA"。
+/// BubiBoyLite bus.odin も bus.oam[] 直書き)。CPU 書込みの禁止窓
+/// (mode2 前半/ mode3・boot 窓)を通らず、全 mode で OAM に載る。
+/// 実 ROM(SFII)が走査線途中で DMA を掛け、ここで欠落すると
+/// スプライト(飛び道具)が消える。writeOAM との差は禁止窓の有無のみ。
+- (void)dmaWriteOAM:(uint8_t)value address:(uint16_t)address {
+    ((uint8_t *)_oam.mutableBytes)[address & 0xFF] = value;
+}
+
 - (void)setLcdc:(uint8_t)value {
     // LCD OFF→ON 遷移で「死相」を設定(実機 80 dots = mode2 と同長: LY=0 固定・
     // モード読出し 0・OAM/VRAM ともアクセス可 → lcdon_timing-GS 実測からの定数)。

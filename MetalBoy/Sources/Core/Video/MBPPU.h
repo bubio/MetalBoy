@@ -34,6 +34,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)writeVRAM:(uint8_t)value address:(uint16_t)address;
 - (uint8_t)readOAM:(uint16_t)address;
 - (void)writeOAM:(uint8_t)value address:(uint16_t)address;
+/// OAM DMA 専用書込み(Pan Docs: 転送は表示モードに依存しない。
+/// CPU 書込みの禁止窓(mode2 前半/ mode3)を通らず、全 mode で OAM に載る
+/// (BubiBoyLite bus.odin の bus.oam[] 直書き相当))
+- (void)dmaWriteOAM:(uint8_t)value address:(uint16_t)address;
 - (void)writeSTAT:(uint8_t)value;
 
 /// 1 dot 進行。割り込みビットは外部へ(第5bit VBlank, 第1bit STAT 割り込み)
@@ -46,7 +50,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// VBlank 期間判定(バンクからの DMA などで使用)
 - (BOOL)inVBlank;
-/// DMA($FF46)用の手動 OAM 転送などは外部から API 経由なしで writeOAM を使う
 
 @end
 

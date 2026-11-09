@@ -716,3 +716,26 @@ per-dot OBJ フェッチパイプラインは不要だった。mode 3 開始時�
   (45 PASS / 6 FAIL は既知の MBC emulator-only 群)※ 75 本フルスイートは当時未入手のため
   51 本集合での同一性で退行なしを担保。dmg-acid2 のフレームバッファは修正前後で一致
   (黒画面のままで未解決 = 別の既知課題として残す)
+
+### 修正 22: OAM DMA の書込みが OAM 禁止窓(mode2 前半/mode3)を通っていた(2026-11-09)
+
+SFII 対戦画面でスプライト(状態表示・エフェクト群)が欠落する第 2 の原因。DMA 転送
+(`$FF46`, `MBMemoryMap dmaTickOneMCycle`)が `[ppu writeOAM:...]`(CPU 書込み用の
+OAM 書込み禁止窓, 修正 16 で実装)を通っており、1 転送 160 M-cycle 全体が走査線を跨ぐ
+ため、mode3(172 dot = 43 M)と mode2 前 80 dot = 20 M 分のバイトが**捨てられていた**。
+Pan Docs "OAM DMA" は転送が表示モードに依存しないことを明示し、参照実装
+`~/dev/_Emu/BubiBoyLite/src/core/bus.odin` も `bus.oam[]` 直書き(CPU 書込み抑制
+`dma_active` とは別経路)なので、DMA の OAM 書込みは mode 無条件とするのが正:
+
+- `MBPPU` に `-dmaWriteOAM:address:` を追加(禁止窓を通らぬ直.store、
+  `writeOAM:` との差は窓の有無のみ)。`MBMemoryMap` の DMA 転送はこちら経由に変更。
+- メモ節約のため DMA 経路の仕様を `MBPPU.h`/`MBMemoryMap.h` のコメントに明記。
+- 回帰テスト(`MBMemoryMapDMATests.m` 2 件追加, 先に失敗 107 assertions を確認後に実装):
+  `testDMATransfersAllBytesAcrossPPUModes`(通常ライン mode2 で DMA 起動 → 全 160 byte
+  が OAM に載る)/ `testDMADuringMode3KeepsAllBytes`(mode3 起動でも同様)。
+  実機構成同等の合成 tick(メモリ 1 M + PPU 4 dot)で主打付け。
+- 影響実測: SFII 同一入力スケジュールの修正前後 BMP 全比較(dumpall/mbB vs mbfy)で
+  f3572-4036 対戦区間 170 フレームに差分(リング上のキャラ/スプライト領域)、
+  対戦前導/メニューは全フレーム無差分。ブーム出現の最終確認は実アプリ(GUI)で実施予定。
+- リグレッション: Mooneye 51 本 45 PASS(前回同値・変化なし)/ dmg-acid2 フレームバッファ
+  一致 / blargg cpu_instrs・instr_timing・mem_timing 変化なし / 単体テスト全 GREEN。
